@@ -9,6 +9,7 @@ use path_macro::path;
 use rand::{CryptoRng, RngCore};
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -26,7 +27,12 @@ pub struct Lethe<C, R, H, const N: usize> {
     rng: R,
 }
 
-impl<C, R, H, const N: usize> Lethe<C, R, H, N> {
+impl<C, R, H, const N: usize> Lethe<C, R, H, N>
+where
+    C: Crypter,
+    R: RngCore + CryptoRng + Clone,
+    H: Hasher<N>,
+{
     fn master_key_path<P: AsRef<Path>>(root: P) -> PathBuf {
         path![root / "master.key"]
     }
@@ -35,8 +41,33 @@ impl<C, R, H, const N: usize> Lethe<C, R, H, N> {
         path![root / "master.khf"]
     }
 
-    fn object_khf_path<P: AsRef<Path>>(root: P, obj: ObjId) -> PathBuf {
-        path![root / format!("obj{obj}.khf")]
+    fn object_khf_path<P: AsRef<Path>>(root: P, objid: ObjId) -> PathBuf {
+        path![root / format!("obj{objid}.khf")]
+    }
+
+    fn load_object_khf(&mut self, objid: ObjId) -> result::Result<()> {
+        if self.object_khfs.contains_key(&objid) {
+            return Ok(());
+        }
+
+        self.object_khfs.insert(
+            objid,
+            Khf::setup((
+                None,
+                Self::object_khf_path(&self.root, objid),
+                DEFAULT_INODE_KHF_FANOUTS.to_vec(),
+                self.rng.clone(),
+            ))?,
+        );
+
+        if fs::metadata(Self::object_khf_path(&self.root, objid))?.len() > 0 {
+            self.object_khfs
+                .get_mut(&objid)
+                .unwrap()
+                .load(Some(self.master_khf.derive(objid as u64)?), ())?;
+        }
+
+        Ok(())
     }
 }
 
@@ -70,38 +101,16 @@ where
         })
     }
 
-    fn derive(&mut self, (objid, blkid): Self::KeyId) -> Self::Key {
-        if !self.object_khfs.contains_key(&objid) {
-            self.object_khfs.insert(
-                objid,
-                Khf::setup((
-                    None,
-                    Self::object_khf_path(&self.root, objid),
-                    DEFAULT_INODE_KHF_FANOUTS.to_vec(),
-                    self.rng.clone(),
-                ))
-                .unwrap(),
-            );
-        }
-        self.object_khfs.get_mut(&objid).unwrap().derive(blkid)
+    fn derive(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
+        self.load_object_khf(objid)?;
+        Ok(self.object_khfs.get_mut(&objid).unwrap().derive(blkid)?)
     }
 
     // TODO: fix object id in KHF.
-    fn update(&mut self, (objid, blkid): Self::KeyId) -> Self::Key {
-        if !self.object_khfs.contains_key(&objid) {
-            self.object_khfs.insert(
-                objid,
-                Khf::setup((
-                    None,
-                    Self::object_khf_path(&self.root, objid),
-                    DEFAULT_INODE_KHF_FANOUTS.to_vec(),
-                    self.rng.clone(),
-                ))
-                .unwrap(),
-            );
-        }
-        self.master_khf.update(objid as u64);
-        self.object_khfs.get_mut(&objid).unwrap().update(blkid)
+    fn update(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
+        self.master_khf.update(objid as u64)?;
+        self.load_object_khf(objid)?;
+        Ok(self.object_khfs.get_mut(&objid).unwrap().update(blkid)?)
     }
 
     fn commit(&mut self) {
@@ -120,7 +129,7 @@ where
 
     fn persist_public_state(&mut self, _: Self::PublicParams) -> Result<(), Self::Error> {
         for (objid, khf) in self.object_khfs.iter_mut() {
-            khf.persist_public_state(Some(self.master_khf.derive(*objid as u64)))?;
+            khf.persist_public_state(Some(self.master_khf.derive(*objid as u64)?))?;
         }
         self.master_khf.persist_public_state(None)?;
         Ok(())
@@ -134,7 +143,6 @@ where
         Ok(())
     }
 
-    // TODO: decide when to load in object KHF.
     fn load_public_state(&mut self, _: Self::PublicParams) -> Result<(), Self::Error> {
         self.master_khf.load_public_state(None)?;
         Ok(())
