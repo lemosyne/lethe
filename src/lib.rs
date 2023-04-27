@@ -1,17 +1,12 @@
 pub mod error;
+pub mod io;
 pub mod result;
 
-use crypter::Crypter;
 use hasher::Hasher;
 use khf::Khf;
 use kms::KeyManagementScheme;
-use path_macro::path;
 use rand::{CryptoRng, RngCore};
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
 
 const DEFAULT_MASTER_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
 const DEFAULT_INODE_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
@@ -20,86 +15,49 @@ type ObjId = u128;
 type BlkId = u64;
 type Key<const N: usize> = [u8; N];
 
-pub struct Lethe<C, R, H, const N: usize> {
-    root: PathBuf,
-    master_khf: Khf<C, R, H, N>,
-    object_khfs: HashMap<ObjId, Khf<C, R, H, N>>,
+pub struct Lethe<R, H, const N: usize> {
+    master_key: Key<N>,
+    master_khf: Khf<R, H, N>,
+    object_khfs: HashMap<ObjId, Khf<R, H, N>>,
     rng: R,
 }
 
-impl<C, R, H, const N: usize> Lethe<C, R, H, N>
+impl<R, H, const N: usize> Lethe<R, H, N>
 where
-    C: Crypter,
     R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
-    fn master_key_path<P: AsRef<Path>>(root: P) -> PathBuf {
-        path![root / "master.key"]
+    pub fn new(mut rng: R) -> Self {
+        Self {
+            master_key: Self::random_key(&mut rng),
+            master_khf: Khf::new(rng.clone(), DEFAULT_MASTER_KHF_FANOUTS),
+            object_khfs: HashMap::new(),
+            rng,
+        }
     }
 
-    fn master_khf_path<P: AsRef<Path>>(root: P) -> PathBuf {
-        path![root / "master.khf"]
-    }
-
-    fn object_khf_path<P: AsRef<Path>>(root: P, objid: ObjId) -> PathBuf {
-        path![root / format!("obj{objid}.khf")]
+    fn random_key(rng: &mut R) -> Key<N> {
+        let mut key = [0; N];
+        rng.fill_bytes(&mut key);
+        key
     }
 
     fn load_object_khf(&mut self, objid: ObjId) -> result::Result<()> {
         if self.object_khfs.contains_key(&objid) {
             return Ok(());
         }
-
-        self.object_khfs.insert(
-            objid,
-            Khf::setup((
-                None,
-                Self::object_khf_path(&self.root, objid),
-                DEFAULT_INODE_KHF_FANOUTS.to_vec(),
-                self.rng.clone(),
-            ))?,
-        );
-
-        if fs::metadata(Self::object_khf_path(&self.root, objid))?.len() > 0 {
-            self.object_khfs
-                .get_mut(&objid)
-                .unwrap()
-                .load(Some(self.master_khf.derive(objid as u64)?), ())?;
-        }
-
         Ok(())
     }
 }
 
-impl<C, R, H, const N: usize> KeyManagementScheme for Lethe<C, R, H, N>
+impl<R, H, const N: usize> KeyManagementScheme for Lethe<R, H, N>
 where
-    C: Crypter,
     R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
-    type Init = (PathBuf, R);
     type Key = Key<N>;
     type KeyId = (ObjId, BlkId);
     type Error = error::Error;
-    type PublicParams = ();
-    type PrivateParams = ();
-
-    fn setup((root, rng): Self::Init) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        Ok(Self {
-            root: root.clone(),
-            master_khf: Khf::setup((
-                Some(Self::master_key_path(&root)),
-                Self::master_khf_path(&root),
-                DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
-                rng.clone(),
-            ))?,
-            object_khfs: HashMap::new(),
-            rng,
-        })
-    }
 
     fn derive(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
         self.load_object_khf(objid)?;
@@ -113,43 +71,45 @@ where
         Ok(self.object_khfs.get_mut(&objid).unwrap().update(blkid)?)
     }
 
-    fn commit(&mut self) {
-        for khf in self.object_khfs.values_mut() {
-            khf.commit();
-        }
-        self.master_khf.commit();
-    }
+    fn commit(&mut self) -> Vec<Self::KeyId> {
+        let mut changes = vec![];
 
-    fn compact(&mut self) {
-        for khf in self.object_khfs.values_mut() {
-            khf.compact();
-        }
-        self.master_khf.compact();
-    }
-
-    fn persist_public_state(&mut self, _: Self::PublicParams) -> Result<(), Self::Error> {
         for (objid, khf) in self.object_khfs.iter_mut() {
-            khf.persist_public_state(Some(self.master_khf.derive(*objid as u64)?))?;
+            changes.extend(khf.commit().into_iter().map(|blkid| (*objid, blkid)));
         }
-        self.master_khf.persist_public_state(None)?;
-        Ok(())
-    }
 
-    fn persist_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
-        for khf in self.object_khfs.values_mut() {
-            khf.persist_private_state(())?;
-        }
-        self.master_khf.persist_private_state(())?;
-        Ok(())
-    }
+        self.master_khf.commit();
 
-    fn load_public_state(&mut self, _: Self::PublicParams) -> Result<(), Self::Error> {
-        self.master_khf.load_public_state(None)?;
-        Ok(())
-    }
-
-    fn load_private_state(&mut self, _: Self::PrivateParams) -> Result<(), Self::Error> {
-        self.master_khf.load_private_state(())?;
-        Ok(())
+        changes
     }
 }
+
+// impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Lethe<R, H, N> {
+//     type Init = R;
+
+//     fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {
+//         // TODO: stream serialization
+//         let ser = bincode::serialize(&self.state).unwrap();
+//         sink.write_all(&ser)
+//     }
+
+//     fn load(&self, rng: Self::Init, mut source: IO) -> Result<Self, IO::Error> {
+//         let mut raw = vec![];
+//         loop {
+//             let mut block = [0; 0x4000];
+//             let n = source.read(&mut block)?;
+
+//             if n == 0 {
+//                 break;
+//             }
+
+//             raw.extend(&block[..n]);
+//         }
+
+//         // TODO: stream serialization
+//         Ok(Khf {
+//             state: bincode::deserialize(&raw).unwrap(),
+//             rng,
+//         })
+//     }
+// }
