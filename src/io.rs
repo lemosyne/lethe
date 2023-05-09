@@ -68,6 +68,16 @@ pub struct BlockCryptIO<IO, KMS, C, const N: usize, const M: usize> {
     pd: PhantomData<C>,
 }
 
+impl<IO, KMS, C, const N: usize, const M: usize> BlockCryptIO<IO, KMS, C, N, M> {
+    pub fn new(io: IO, kms: KMS) -> Self {
+        Self {
+            io,
+            kms,
+            pd: PhantomData,
+        }
+    }
+}
+
 impl<IO, KMS, C, const N: usize, const M: usize> Io for BlockCryptIO<IO, KMS, C, N, M>
 where
     IO: Io,
