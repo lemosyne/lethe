@@ -156,7 +156,7 @@ where
 impl<IO, KMS, C, const N: usize, const M: usize> Write for BlockCryptIO<IO, KMS, C, N, M>
 where
     IO: Io + Read + Write + Seek,
-    KMS: KeyManagementScheme<KeyId = usize, Key = [u8; M]>,
+    KMS: KeyManagementScheme<KeyId = usize, Key = Key<M>>,
     C: Crypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
