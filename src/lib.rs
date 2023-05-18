@@ -1,38 +1,45 @@
 pub mod error;
-pub mod io;
 pub mod result;
 
+use crypter::Crypter;
+use embedded_io::blocking::{Read, Write};
 use hasher::Hasher;
+use inachus::{blocking::CryptIo, IoGenerator};
 use khf::Khf;
-use kms::KeyManagementScheme;
+use kms::{KeyManagementScheme, Persist};
 use rand::{CryptoRng, RngCore};
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 const DEFAULT_MASTER_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
-const DEFAULT_INODE_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
+const DEFAULT_OBJECT_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
 
-type ObjId = u128;
+type ObjId = u64;
 type BlkId = u64;
 type Key<const N: usize> = [u8; N];
 
-pub struct Lethe<R, H, const N: usize> {
+pub struct Lethe<IoG, R, H, C, const N: usize> {
     master_key: Key<N>,
     master_khf: Khf<R, H, N>,
     object_khfs: HashMap<ObjId, Khf<R, H, N>>,
+    iog: IoG,
     rng: R,
+    pd: PhantomData<C>,
 }
 
-impl<R, H, const N: usize> Lethe<R, H, N>
+impl<IoG, R, H, C, const N: usize> Lethe<IoG, R, H, C, N>
 where
+    IoG: IoGenerator,
     R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
-    pub fn new(mut rng: R) -> Self {
+    pub fn new(iog: IoG, mut rng: R) -> Self {
         Self {
             master_key: Self::random_key(&mut rng),
             master_khf: Khf::new(rng.clone(), DEFAULT_MASTER_KHF_FANOUTS),
             object_khfs: HashMap::new(),
+            iog,
             rng,
+            pd: PhantomData,
         }
     }
 
@@ -41,17 +48,11 @@ where
         rng.fill_bytes(&mut key);
         key
     }
-
-    fn load_object_khf(&mut self, objid: ObjId) -> result::Result<()> {
-        if self.object_khfs.contains_key(&objid) {
-            return Ok(());
-        }
-        Ok(())
-    }
 }
 
-impl<R, H, const N: usize> KeyManagementScheme for Lethe<R, H, N>
+impl<IoG, R, H, C, const N: usize> KeyManagementScheme for Lethe<IoG, R, H, C, N>
 where
+    IoG: IoGenerator,
     R: RngCore + CryptoRng + Clone,
     H: Hasher<N>,
 {
@@ -60,14 +61,12 @@ where
     type Error = error::Error;
 
     fn derive(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
-        self.load_object_khf(objid)?;
         Ok(self.object_khfs.get_mut(&objid).unwrap().derive(blkid)?)
     }
 
     // TODO: fix object id in KHF.
     fn update(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
         self.master_khf.update(objid as u64)?;
-        self.load_object_khf(objid)?;
         Ok(self.object_khfs.get_mut(&objid).unwrap().update(blkid)?)
     }
 
@@ -84,32 +83,44 @@ where
     }
 }
 
-// impl<IO: Read + Write, R, H, const N: usize> Persist<IO> for Lethe<R, H, N> {
-//     type Init = R;
+impl<Io, IoG, R, H, C, const N: usize> Persist<Io> for Lethe<IoG, R, H, C, N>
+where
+    Io: Read + Write,
+    IoG: IoGenerator<Id = u64>,
+    <IoG as IoGenerator>::Io: Read + Write,
+    R: RngCore + CryptoRng + Clone,
+    H: Hasher<N>,
+    C: Crypter,
+{
+    type Init = (Key<N>, IoG, R);
 
-//     fn persist(&self, mut sink: IO) -> Result<(), IO::Error> {
-//         // TODO: stream serialization
-//         let ser = bincode::serialize(&self.state).unwrap();
-//         sink.write_all(&ser)
-//     }
+    fn persist(&mut self, sink: Io) -> Result<(), Io::Error> {
+        // Persist the object KHFs.
+        for (objid, khf) in self.object_khfs.iter_mut() {
+            let key = self.master_khf.derive(*objid).unwrap();
+            let io = CryptIo::<<IoG as IoGenerator>::Io, C, N>::new(self.iog.generate(*objid), key);
+            khf.persist(io).map_err(|_| ()).unwrap();
+        }
 
-//     fn load(&self, rng: Self::Init, mut source: IO) -> Result<Self, IO::Error> {
-//         let mut raw = vec![];
-//         loop {
-//             let mut block = [0; 0x4000];
-//             let n = source.read(&mut block)?;
+        // Persist the primary KHF.
+        let io = CryptIo::<Io, C, N>::new(sink, self.master_key);
+        self.master_khf.persist(io).map_err(|_| ()).unwrap();
 
-//             if n == 0 {
-//                 break;
-//             }
+        Ok(())
+    }
 
-//             raw.extend(&block[..n]);
-//         }
-
-//         // TODO: stream serialization
-//         Ok(Khf {
-//             state: bincode::deserialize(&raw).unwrap(),
-//             rng,
-//         })
-//     }
-// }
+    fn load((master_key, iog, rng): Self::Init, source: Io) -> Result<Self, <Io>::Error> {
+        // Load the primary KHF.
+        // The object KHFs will be lazy-loaded.
+        Ok(Self {
+            master_key,
+            master_khf: Khf::load(rng.clone(), CryptIo::<Io, C, N>::new(source, master_key))
+                .map_err(|_| ())
+                .unwrap(),
+            object_khfs: HashMap::new(),
+            iog,
+            rng,
+            pd: PhantomData,
+        })
+    }
+}
