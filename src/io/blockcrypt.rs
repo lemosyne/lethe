@@ -39,7 +39,9 @@ where
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let mut total = 0;
         let mut size = buf.len();
-        let mut offset = self.io.stream_position()? as usize;
+
+        let origin = self.io.stream_position()?;
+        let mut offset = origin as usize;
 
         // The offset may be within a block. This requires the bytes before the offset in the block
         // and the bytes after the offset to be read.
@@ -55,6 +57,7 @@ where
             let nbytes = self.io.read(&mut tmp_buf)?;
             let actually_read = nbytes - fill;
             if nbytes == 0 || actually_read == 0 {
+                self.io.seek(SeekFrom::Start(origin))?;
                 return Ok(0);
             }
 
@@ -69,8 +72,7 @@ where
         }
 
         // At this point, the offset we want to read from is block-aligned. If it isn't, then we
-        // must have written out all the bytes. Otherwise, read in the rest of the bytes
-        // block-by-block.
+        // must have read all the bytes. Otherwise, read in the rest of the bytes block-by-block.
         while size > 0 && offset % N == 0 {
             let block = offset / N;
             let rest = size.min(N);
@@ -81,6 +83,7 @@ where
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.read(&mut tmp_buf)?;
             if nbytes == 0 {
+                self.io.seek(SeekFrom::Start(origin + total as u64))?;
                 return Ok(total);
             }
 
@@ -93,6 +96,8 @@ where
             size -= nbytes;
             total += nbytes;
         }
+
+        self.io.seek(SeekFrom::Start(origin + total as u64))?;
 
         Ok(total)
     }
@@ -107,9 +112,11 @@ where
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         let mut total = 0;
         let mut size = buf.len();
-        let mut offset = self.io.stream_position()? as usize;
 
-        // The read offset may or may not be block-aligned. If it isn't, then the bytes in the
+        let origin = self.io.stream_position()?;
+        let mut offset = origin as usize;
+
+        // The write offset may or may not be block-aligned. If it isn't, then the bytes in the
         // block preceding the offset byte should be read as well. The number of bytes to write
         // starting from the offset should be the minimum of the total bytes left to write and the
         // rest of the bytes in the block.
@@ -124,11 +131,12 @@ where
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.read(&mut tmp_buf)?;
             if nbytes == 0 {
+                self.io.seek(SeekFrom::Start(origin))?;
                 return Ok(0);
             }
 
             let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-            let mut tmp_buf = C::onetime_encrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
+            let mut tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             tmp_buf[fill..fill + rest].copy_from_slice(&buf[..rest]);
 
@@ -141,6 +149,7 @@ where
             let nbytes = self.io.write(&tmp_buf[..amount])?;
             let actually_written = rest.min(nbytes - fill);
             if nbytes == 0 || actually_written == 0 {
+                self.io.seek(SeekFrom::Start(origin))?;
                 return Ok(0);
             }
 
@@ -164,6 +173,7 @@ where
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.write(&tmp_buf)?;
             if nbytes == 0 {
+                self.io.seek(SeekFrom::Start(origin + total as u64))?;
                 return Ok(total);
             }
 
@@ -177,7 +187,8 @@ where
         if size > 0 {
             let block = offset / N;
 
-            let mut tmp_buf = vec![0; size];
+            // Try to read a whole block.
+            let mut tmp_buf = vec![0; N];
             let off = block * N;
             self.io.seek(SeekFrom::Start(off as u64))?;
             self.io.read(&mut tmp_buf)?;
@@ -196,9 +207,12 @@ where
             total += size.min(nbytes as usize);
 
             if nbytes == 0 {
+                self.io.seek(SeekFrom::Start(origin + total as u64))?;
                 return Ok(total);
             }
         }
+
+        self.io.seek(SeekFrom::Start(origin + total as u64))?;
 
         Ok(total)
     }
@@ -246,7 +260,7 @@ mod tests {
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
-            Khf::new(ThreadRng::default(), &[4, 4, 4, 4]),
+            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
         );
 
         blockio.write_all(&['a' as u8; 4 * BLOCK_SIZE])?;
@@ -275,11 +289,11 @@ mod tests {
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
-            Khf::new(ThreadRng::default(), &[4, 4, 4, 4]),
+            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
         );
 
         blockio.write_all(&['a' as u8; 2 * BLOCK_SIZE])?;
-        blockio.seek(SeekFrom::Start(BLOCK_SIZE as u64 / 2))?;
+        blockio.seek(SeekFrom::Start((BLOCK_SIZE / 2) as u64))?;
         blockio.write_all(&['b' as u8; BLOCK_SIZE])?;
 
         let mut buf = vec![0; 2 * BLOCK_SIZE];
@@ -309,7 +323,7 @@ mod tests {
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
-            Khf::new(ThreadRng::default(), &[4, 4, 4, 4]),
+            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
         );
 
         blockio.write_all(&['a' as u8])?;

@@ -1,9 +1,9 @@
+mod alloc;
 pub mod error;
 pub mod io;
 pub mod result;
 
-mod store;
-
+use alloc::Allocator;
 use crypter::Crypter;
 use embedded_io::blocking::{Read, Write};
 use error::Error;
@@ -15,7 +15,6 @@ use kms::{KeyManagementScheme, PersistedKeyManagementScheme};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, marker::PhantomData};
-use store::Allocator;
 
 pub(crate) type Key<const N: usize> = [u8; N];
 
@@ -130,7 +129,7 @@ where
             .flatten())
     }
 
-    /// Remove a `Khf`.
+    /// Remove an object `Khf`.
     pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, N>> {
         self.allocator.dealloc(objid);
         self.mappings
