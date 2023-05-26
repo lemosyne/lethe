@@ -7,8 +7,7 @@ edition = "2021"
 crypter = { git = "https://github.com/lemosyne/crypter.git" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
-hex = "0.4.3"
-khf = { path = "../khf" }
+khf = { git = "https://github.com/lemosyne/khf.git" }
 kms = { git = "https://github.com/lemosyne/kms.git", features = ["persistence"] }
 inachus = { git = "ssh://git@github.com/lemosyne/inachus.git" }
 rand = "0.8.5"
