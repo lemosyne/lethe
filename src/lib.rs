@@ -1,126 +1,198 @@
 pub mod error;
+pub mod io;
 pub mod result;
+
+mod store;
 
 use crypter::Crypter;
 use embedded_io::blocking::{Read, Write};
+use error::Error;
 use hasher::Hasher;
-use inachus::{blocking::CryptIo, IoGenerator};
+use inachus::{IoGenerator, Persist};
+use io::CryptIo;
 use khf::Khf;
-use kms::{KeyManagementScheme, Persist};
+use kms::{KeyManagementScheme, PersistedKeyManagementScheme};
 use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, marker::PhantomData};
+use store::Allocator;
 
-const DEFAULT_MASTER_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
-const DEFAULT_OBJECT_KHF_FANOUTS: &[u64] = &[4, 4, 4, 4];
+pub(crate) type Key<const N: usize> = [u8; N];
 
-type ObjId = u64;
-type BlkId = u64;
-type Key<const N: usize> = [u8; N];
-
-pub struct Lethe<IoG, R, H, C, const N: usize> {
-    master_key: Key<N>,
+#[derive(Serialize, Deserialize)]
+pub struct Lethe<R, H, C, const N: usize> {
+    #[serde(bound(serialize = "Khf<R, H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Khf<R, H, N>: Deserialize<'de>"))]
     master_khf: Khf<R, H, N>,
-    object_khfs: HashMap<ObjId, Khf<R, H, N>>,
-    iog: IoG,
-    rng: R,
+    #[serde(bound(serialize = "Khf<R, H, N>: Serialize"))]
+    #[serde(bound(deserialize = "Khf<R, H, N>: Deserialize<'de>"))]
+    object_khfs: HashMap<u64, Khf<R, H, N>>,
+    mappings: HashMap<u64, u64>,
+    allocator: Allocator,
     pd: PhantomData<C>,
 }
 
-impl<IoG, R, H, C, const N: usize> Lethe<IoG, R, H, C, N>
+impl<R, H, C, const N: usize> Lethe<R, H, C, N>
 where
-    IoG: IoGenerator,
-    R: RngCore + CryptoRng + Clone,
+    R: RngCore + CryptoRng + Clone + Default,
     H: Hasher<N>,
+    C: Crypter,
 {
-    pub fn new(iog: IoG, mut rng: R) -> Self {
+    /// Creates a new `Lethe` instance.
+    pub fn new(fanouts: &[u64], rng: R) -> Self {
         Self {
-            master_key: Self::random_key(&mut rng),
-            master_khf: Khf::new(rng.clone(), DEFAULT_MASTER_KHF_FANOUTS),
+            master_khf: Khf::new(fanouts, rng.clone()),
             object_khfs: HashMap::new(),
-            iog,
-            rng,
+            mappings: HashMap::new(),
+            allocator: Allocator::new(),
             pd: PhantomData,
         }
     }
 
-    fn random_key(rng: &mut R) -> Key<N> {
-        let mut key = [0; N];
-        rng.fill_bytes(&mut key);
-        key
-    }
-}
-
-impl<IoG, R, H, C, const N: usize> KeyManagementScheme for Lethe<IoG, R, H, C, N>
-where
-    IoG: IoGenerator,
-    R: RngCore + CryptoRng + Clone,
-    H: Hasher<N>,
-{
-    type Key = Key<N>;
-    type KeyId = (ObjId, BlkId);
-    type Error = error::Error;
-
-    fn derive(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
-        Ok(self.object_khfs.get_mut(&objid).unwrap().derive(blkid)?)
-    }
-
-    // TODO: fix object id in KHF.
-    fn update(&mut self, (objid, blkid): Self::KeyId) -> Result<Self::Key, Self::Error> {
-        self.master_khf.update(objid as u64)?;
-        Ok(self.object_khfs.get_mut(&objid).unwrap().update(blkid)?)
-    }
-
-    fn commit(&mut self) -> Vec<Self::KeyId> {
-        let mut changes = vec![];
-
-        for (objid, khf) in self.object_khfs.iter_mut() {
-            changes.extend(khf.commit().into_iter().map(|blkid| (*objid, blkid)));
+    /// Loads a persisted object `Khf`.
+    fn load_khf<IoG>(&mut self, iog: &mut IoG, objid: u64) -> Result<(), Error>
+    where
+        IoG: IoGenerator<Id = u64>,
+        <IoG as IoGenerator>::Io: Read + Write,
+    {
+        // If the object `Khf` is already loaded, we're done.
+        if let Some(true) = self
+            .mappings
+            .get(&objid)
+            .map(|mapped_objid| self.object_khfs.contains_key(mapped_objid))
+        {
+            return Ok(());
         }
 
-        self.master_khf.commit();
+        // Construct the `Io` to load the object `Khf`.
+        let mapped_objid = self.mappings[&objid];
+        let key = self.master_khf.derive(mapped_objid)?;
+        let io = CryptIo::<<IoG as IoGenerator>::Io, C, N>::new(
+            iog.generate(mapped_objid).map_err(|_| Error::Io)?,
+            key,
+        );
 
-        changes
-    }
-}
-
-impl<Io, IoG, R, H, C, const N: usize> Persist<Io> for Lethe<IoG, R, H, C, N>
-where
-    Io: Read + Write,
-    IoG: IoGenerator<Id = u64>,
-    <IoG as IoGenerator>::Io: Read + Write,
-    R: RngCore + CryptoRng + Clone,
-    H: Hasher<N>,
-    C: Crypter,
-{
-    type Init = (Key<N>, IoG, R);
-
-    fn persist(&mut self, sink: Io) -> Result<(), Io::Error> {
-        // Persist the object KHFs.
-        for (objid, khf) in self.object_khfs.iter_mut() {
-            let key = self.master_khf.derive(*objid).unwrap();
-            let io = CryptIo::<<IoG as IoGenerator>::Io, C, N>::new(self.iog.generate(*objid), key);
-            khf.persist(io).map_err(|_| ()).unwrap();
-        }
-
-        // Persist the primary KHF.
-        let io = CryptIo::<Io, C, N>::new(sink, self.master_key);
-        self.master_khf.persist(io).map_err(|_| ()).unwrap();
+        // Only IO errors should prevent the object `Khf` from being loaded.
+        let khf = Khf::load(io)?;
+        self.insert_khf(objid, khf)?;
 
         Ok(())
     }
 
-    fn load((master_key, iog, rng): Self::Init, source: Io) -> Result<Self, <Io>::Error> {
-        // Load the primary KHF.
-        // The object KHFs will be lazy-loaded.
-        Ok(Self {
-            master_key,
-            master_khf: Khf::load(rng.clone(), CryptIo::<Io, C, N>::new(source, master_key))
-                .map_err(|_| ())
-                .unwrap(),
-            object_khfs: HashMap::new(),
-            iog,
-            rng,
-            pd: PhantomData,
-        })
+    /// Inserts a new `Khf` to track.
+    pub fn insert_khf(
+        &mut self,
+        objid: u64,
+        khf: Khf<R, H, N>,
+    ) -> Result<Option<Khf<R, H, N>>, Error> {
+        if let Some(mapped_objid) = self.mappings.get(&objid) {
+            Ok(self.object_khfs.insert(*mapped_objid, khf))
+        } else {
+            let mapped_objid = self.allocator.alloc()?;
+            self.mappings.insert(objid, mapped_objid);
+            Ok(self.object_khfs.insert(mapped_objid, khf))
+        }
+    }
+
+    /// Returns an immutable reference to an object `Khf`.
+    pub fn get_khf<IoG>(
+        &mut self,
+        iog: &mut IoG,
+        objid: u64,
+    ) -> Result<Option<&Khf<R, H, N>>, Error>
+    where
+        IoG: IoGenerator<Id = u64>,
+        <IoG as IoGenerator>::Io: Read + Write,
+    {
+        self.load_khf(iog, objid)?;
+        Ok(self
+            .mappings
+            .get(&objid)
+            .map(|mapped_objid| self.object_khfs.get(mapped_objid))
+            .flatten())
+    }
+
+    /// Returns a mutable reference to an object `Khf`.
+    pub fn get_khf_mut<IoG>(
+        &mut self,
+        iog: &mut IoG,
+        objid: u64,
+    ) -> Result<Option<&mut Khf<R, H, N>>, Error>
+    where
+        IoG: IoGenerator<Id = u64>,
+        <IoG as IoGenerator>::Io: Read + Write,
+    {
+        self.load_khf(iog, objid)?;
+        Ok(self
+            .mappings
+            .get(&objid)
+            .map(|mapped_objid| self.object_khfs.get_mut(mapped_objid))
+            .flatten())
+    }
+
+    /// Remove a `Khf`.
+    pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, N>> {
+        self.allocator.dealloc(objid);
+        self.mappings
+            .remove(&objid)
+            .map(|mapped_objid| self.object_khfs.remove(&mapped_objid))
+            .flatten()
+    }
+}
+
+impl<IoG, R, H, C, const N: usize> PersistedKeyManagementScheme<IoG> for Lethe<R, H, C, N>
+where
+    IoG: IoGenerator<Id = u64>,
+    <IoG as IoGenerator>::Io: Read + Write,
+    R: RngCore + CryptoRng + Clone + Default,
+    H: Hasher<N>,
+    C: Crypter,
+{
+    type Key = Key<N>;
+    type KeyId = (u64, u64);
+    type Error = Error;
+
+    fn derive(
+        &mut self,
+        iog: &mut IoG,
+        (objid, blkid): Self::KeyId,
+    ) -> Result<Self::Key, Self::Error> {
+        Ok(self.get_khf_mut(iog, objid)?.unwrap().derive(blkid)?)
+    }
+
+    fn update(
+        &mut self,
+        iog: &mut IoG,
+        (objid, blkid): Self::KeyId,
+    ) -> Result<Self::Key, Self::Error> {
+        Ok(self.get_khf_mut(iog, objid)?.unwrap().update(blkid)?)
+    }
+
+    fn commit(&mut self, _: &mut IoG) -> Vec<Self::KeyId> {
+        self.object_khfs
+            .iter_mut()
+            .flat_map(|(objid, khf)| khf.commit().into_iter().map(|blkid| (*objid, blkid)))
+            .collect()
+    }
+}
+
+impl<Io, R, H, C, const N: usize> Persist<Io> for Lethe<R, H, C, N>
+where
+    R: Default,
+    Io: Read + Write,
+{
+    type Error = Error;
+
+    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
+        // TODO: Stream serialization.
+        let ser = bincode::serialize(&self)?;
+        sink.write_all(&ser).map_err(|_| Error::Io)
+    }
+
+    fn load(mut source: Io) -> Result<Self, Self::Error> {
+        // TODO: Stream deserialization.
+        let mut raw = vec![];
+        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
+        Ok(bincode::deserialize(&raw)?)
     }
 }

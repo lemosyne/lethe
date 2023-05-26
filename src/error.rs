@@ -1,10 +1,15 @@
-use std::io;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("io error")]
+    Io,
+
     #[error(transparent)]
-    IO(#[from] io::Error),
+    Serde(#[from] bincode::Error),
+
+    #[error("no more object ids")]
+    ObjIdAllocation,
 
     #[error(transparent)]
     Khf(#[from] khf::Error),
