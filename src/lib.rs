@@ -19,7 +19,7 @@ use std::{collections::HashMap, marker::PhantomData};
 pub(crate) type Key<const N: usize> = [u8; N];
 
 #[derive(Serialize, Deserialize)]
-pub struct Lethe<R, H, C, const N: usize> {
+pub struct Lethe<R, C, H, const N: usize> {
     #[serde(bound(serialize = "Khf<R, H, N>: Serialize"))]
     #[serde(bound(deserialize = "Khf<R, H, N>: Deserialize<'de>"))]
     master_khf: Khf<R, H, N>,
@@ -31,11 +31,11 @@ pub struct Lethe<R, H, C, const N: usize> {
     pd: PhantomData<C>,
 }
 
-impl<R, H, C, const N: usize> Lethe<R, H, C, N>
+impl<R, C, H, const N: usize> Lethe<R, C, H, N>
 where
     R: RngCore + CryptoRng + Clone + Default,
-    H: Hasher<N>,
     C: Crypter,
+    H: Hasher<N>,
 {
     /// Creates a new `Lethe` instance.
     pub fn new(fanouts: &[u64], rng: R) -> Self {
@@ -139,13 +139,13 @@ where
     }
 }
 
-impl<IoG, R, H, C, const N: usize> PersistedKeyManagementScheme<IoG> for Lethe<R, H, C, N>
+impl<IoG, R, C, H, const N: usize> PersistedKeyManagementScheme<IoG> for Lethe<R, C, H, N>
 where
     IoG: IoGenerator<Id = u64>,
     <IoG as IoGenerator>::Io: Read + Write,
     R: RngCore + CryptoRng + Clone + Default,
-    H: Hasher<N>,
     C: Crypter,
+    H: Hasher<N>,
 {
     type Key = Key<N>;
     type KeyId = (u64, u64);
