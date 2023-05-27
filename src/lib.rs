@@ -169,15 +169,30 @@ where
 {
     type Id = u64;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, N>, C, 4096, N>
-    where R: 'a, H: 'a, P: 'a, C: 'a;
+        where
+            R: 'a,
+            H: 'a,
+            P: 'a,
+            C: 'a;
     type Error = Error;
 
     fn open<'a>(&'a mut self, objid: Self::Id) -> Result<Self::Io<'_>, Self::Error> {
-        let io = self.open_object(objid)?;
-        Ok(BlockCryptIo::new(
-            io,
-            self.get_khf_mut(objid)?.ok_or(Error::MissingKhf)?,
-        ))
+        self.load_khf(objid)?;
+
+        let io = self
+            .mappings
+            .get(&objid)
+            .map(|mapped_objid| self.storage.open(*mapped_objid).map_err(|_| Error::Io))
+            .ok_or(Error::MissingKhf)??;
+
+        let khf = self
+            .mappings
+            .get(&objid)
+            .map(|mapped_objid| self.object_khfs.get_mut(mapped_objid))
+            .flatten()
+            .ok_or(Error::MissingKhf)?;
+
+        Ok(BlockCryptIo::new(io, khf))
     }
 }
 
