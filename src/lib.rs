@@ -5,11 +5,11 @@ pub mod result;
 
 use alloc::Allocator;
 use crypter::Crypter;
-use embedded_io::blocking::{Read, Write};
+use embedded_io::blocking::{Read, Seek, Write};
 use error::Error;
 use hasher::Hasher;
 use inachus::{IoGenerator, Persist};
-use io::CryptIo;
+use io::{BlockCryptIo, CryptIo};
 use khf::Khf;
 use kms::{KeyManagementScheme, PersistedKeyManagementScheme};
 use rand::{CryptoRng, RngCore};
@@ -136,6 +136,22 @@ where
             .remove(&objid)
             .map(|mapped_objid| self.object_khfs.remove(&mapped_objid))
             .flatten()
+    }
+
+    // Creates a new encrypted `Io`.
+    pub fn new_encrypted_io<Io, IoG, const BLK_SZ: usize>(
+        &mut self,
+        io: Io,
+        iog: &mut IoG,
+        objid: u64,
+    ) -> Result<BlockCryptIo<'_, Io, Khf<R, H, N>, C, BLK_SZ, N>, Error>
+    where
+        Io: Read + Write + Seek,
+        IoG: IoGenerator<Id = u64>,
+        <IoG as IoGenerator>::Io: Read + Write,
+    {
+        let khf = self.get_khf_mut(iog, objid)?.ok_or(Error::MissingKhf)?;
+        Ok(BlockCryptIo::new(io, khf))
     }
 }
 

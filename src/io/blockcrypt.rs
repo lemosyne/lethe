@@ -7,14 +7,16 @@ use embedded_io::{
 use kms::KeyManagementScheme;
 use std::marker::PhantomData;
 
-pub struct BlockCryptIo<IO, KMS, C, const N: usize, const M: usize> {
+pub struct BlockCryptIo<'a, IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
-    kms: KMS,
+    kms: &'a mut KMS,
     pd: PhantomData<C>,
 }
 
-impl<IO, KMS, C, const N: usize, const M: usize> BlockCryptIo<IO, KMS, C, N, M> {
-    pub fn new(io: IO, kms: KMS) -> Self {
+impl<'a, IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize>
+    BlockCryptIo<'a, IO, KMS, C, BLK_SZ, KEY_SZ>
+{
+    pub fn new(io: IO, kms: &'a mut KMS) -> Self {
         Self {
             io,
             kms,
@@ -23,17 +25,19 @@ impl<IO, KMS, C, const N: usize, const M: usize> BlockCryptIo<IO, KMS, C, N, M> 
     }
 }
 
-impl<IO, KMS, C, const N: usize, const M: usize> Io for BlockCryptIo<IO, KMS, C, N, M>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
+    for BlockCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Io,
 {
     type Error = IO::Error;
 }
 
-impl<IO, KMS, C, const N: usize, const M: usize> Read for BlockCryptIo<IO, KMS, C, N, M>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
+    for BlockCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
-    IO: Io + Read + Seek,
-    KMS: KeyManagementScheme<KeyId = u64, Key = [u8; M]>,
+    IO: Read + Seek,
+    KMS: KeyManagementScheme<KeyId = u64, Key = [u8; KEY_SZ]>,
     C: Crypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -45,13 +49,13 @@ where
 
         // The offset may be within a block. This requires the bytes before the offset in the block
         // and the bytes after the offset to be read.
-        if offset % N != 0 {
-            let block = offset / N;
-            let fill = offset % N;
-            let rest = size.min(N - fill);
+        if offset % BLK_SZ != 0 {
+            let block = offset / BLK_SZ;
+            let fill = offset % BLK_SZ;
+            let rest = size.min(BLK_SZ - fill);
 
             let mut tmp_buf = vec![0; (fill + rest) as usize];
-            let off = block * N;
+            let off = block * BLK_SZ;
 
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.read(&mut tmp_buf)?;
@@ -73,12 +77,12 @@ where
 
         // At this point, the offset we want to read from is block-aligned. If it isn't, then we
         // must have read all the bytes. Otherwise, read in the rest of the bytes block-by-block.
-        while size > 0 && offset % N == 0 {
-            let block = offset / N;
-            let rest = size.min(N);
+        while size > 0 && offset % BLK_SZ == 0 {
+            let block = offset / BLK_SZ;
+            let rest = size.min(BLK_SZ);
 
             let mut tmp_buf = vec![0; rest];
-            let off = block * N;
+            let off = block * BLK_SZ;
 
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.read(&mut tmp_buf)?;
@@ -103,10 +107,11 @@ where
     }
 }
 
-impl<IO, KMS, C, const N: usize, const M: usize> Write for BlockCryptIo<IO, KMS, C, N, M>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
+    for BlockCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
-    IO: Io + Read + Write + Seek,
-    KMS: KeyManagementScheme<KeyId = u64, Key = Key<M>>,
+    IO: Read + Write + Seek,
+    KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     C: Crypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -120,13 +125,13 @@ where
         // block preceding the offset byte should be read as well. The number of bytes to write
         // starting from the offset should be the minimum of the total bytes left to write and the
         // rest of the bytes in the block.
-        if offset % N != 0 {
-            let block = offset / N;
-            let fill = offset % N;
-            let rest = size.min(N - fill);
+        if offset % BLK_SZ != 0 {
+            let block = offset / BLK_SZ;
+            let fill = offset % BLK_SZ;
+            let rest = size.min(BLK_SZ - fill);
 
-            let mut tmp_buf = vec![0; N];
-            let off = block * N;
+            let mut tmp_buf = vec![0; BLK_SZ];
+            let off = block * BLK_SZ;
 
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.read(&mut tmp_buf)?;
@@ -161,15 +166,15 @@ where
         // The offset we want to write to should be block-aligned at this point. If not, then we
         // must have written out all the bytes already. Otherwise, write the rest of the bytes
         // block-by-block.
-        while size > 0 && size / N > 0 && offset % N == 0 {
-            let block = offset / N;
+        while size > 0 && size / BLK_SZ > 0 && offset % BLK_SZ == 0 {
+            let block = offset / BLK_SZ;
             self.kms.update(block as u64).map_err(|_| ()).unwrap();
             let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-            let tmp_buf = C::onetime_encrypt(&key, &buf[total..total + N])
+            let tmp_buf = C::onetime_encrypt(&key, &buf[total..total + BLK_SZ])
                 .map_err(|_| ())
                 .unwrap();
 
-            let off = block * N;
+            let off = block * BLK_SZ;
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.write(&tmp_buf)?;
             if nbytes == 0 {
@@ -185,11 +190,11 @@ where
         // Write any remaining bytes that don't fill an entire block. We handle this specially
         // since we have to read in the block to decrypt the bytes after the overwritten bytes.
         if size > 0 {
-            let block = offset / N;
+            let block = offset / BLK_SZ;
 
             // Try to read a whole block.
-            let mut tmp_buf = vec![0; N];
-            let off = block * N;
+            let mut tmp_buf = vec![0; BLK_SZ];
+            let off = block * BLK_SZ;
             self.io.seek(SeekFrom::Start(off as u64))?;
             self.io.read(&mut tmp_buf)?;
 
@@ -222,7 +227,8 @@ where
     }
 }
 
-impl<IO, KMS, C, const N: usize, const M: usize> Seek for BlockCryptIo<IO, KMS, C, N, M>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
+    for BlockCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Seek,
 {
@@ -252,16 +258,15 @@ mod tests {
     // Writes 4 blocks of 'a's, then 4 'b's at offset 3.
     #[test]
     fn offset_write() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
         let mut blockio = BlockCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
-        >::new(
-            FromStd::new(NamedTempFile::new()?),
-            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
-        );
+        >::new(FromStd::new(NamedTempFile::new()?), &mut khf);
 
         blockio.write_all(&['a' as u8; 4 * BLOCK_SIZE])?;
         blockio.seek(SeekFrom::Start(3))?;
@@ -281,16 +286,15 @@ mod tests {
     // Writes 2 blocks of 'a's and a block of 'b' right in the middle.
     #[test]
     fn misaligned_write() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
         let mut blockio = BlockCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
-        >::new(
-            FromStd::new(NamedTempFile::new()?),
-            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
-        );
+        >::new(FromStd::new(NamedTempFile::new()?), &mut khf);
 
         blockio.write_all(&['a' as u8; 2 * BLOCK_SIZE])?;
         blockio.seek(SeekFrom::Start((BLOCK_SIZE / 2) as u64))?;
@@ -315,16 +319,15 @@ mod tests {
 
     #[test]
     fn short_write() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
         let mut blockio = BlockCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
-        >::new(
-            FromStd::new(NamedTempFile::new()?),
-            Khf::new(&[4, 4, 4, 4], ThreadRng::default()),
-        );
+        >::new(FromStd::new(NamedTempFile::new()?), &mut khf);
 
         blockio.write_all(&['a' as u8])?;
         blockio.write_all(&['b' as u8])?;
