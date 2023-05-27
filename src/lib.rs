@@ -6,7 +6,7 @@ pub mod result;
 
 use alloc::Allocator;
 use crypter::Crypter;
-use datastore::{Mode, PersistentStorage};
+use datastore::PersistentStorage;
 use embedded_io::blocking::{Read, Seek, Write};
 use error::Error;
 use hasher::Hasher;
@@ -55,14 +55,10 @@ where
     }
 
     /// Opens an `Io` to an object in the specified mode.
-    fn open_object(&mut self, objid: u64, mode: Mode) -> Result<P::Io<'_>, Error> {
+    pub(crate) fn open_object(&mut self, objid: u64) -> Result<P::Io<'_>, Error> {
         self.mappings
             .get(&objid)
-            .map(|mapped_objid| {
-                self.storage
-                    .open(*mapped_objid, mode)
-                    .map_err(|_| Error::Io)
-            })
+            .map(|mapped_objid| self.storage.open(*mapped_objid).map_err(|_| Error::Io))
             .ok_or(Error::MissingKhf)?
     }
 
@@ -79,10 +75,8 @@ where
         // Construct the `Io` to load the object `Khf`.
         let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
         let key = self.master_khf.derive(*mapped_objid)?;
-        let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(
-            self.open_object(objid, Mode::Read)?,
-            key,
-        );
+        let io =
+            CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(self.open_object(objid)?, key);
 
         // Only IO errors should prevent the object `Khf` from being loaded.
         let khf = Khf::load(io)?;
@@ -90,6 +84,32 @@ where
 
         Ok(())
     }
+
+    /// Persists an object `Khf`.
+    // fn persist_khf(&mut self, objid: u64) -> Result<(), Error> {
+    //     // If the object `Khf` is isn't loaded, we're done.
+    //     if !self
+    //         .object_khfs
+    //         .contains_key(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
+    //     {
+    //         return Ok(());
+    //     }
+
+    //     // Construct the `Io` to persist the object `Khf`.
+    //     let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
+    //     let key = self.master_khf.derive(*mapped_objid)?;
+    //     let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(
+    //         self.open_object(objid, Mode::Write)?,
+    //         key,
+    //     );
+
+    //     // Only IO errors should prevent the object `Khf` from being loaded.
+    //     let khf = Khf::load(io)?;
+    //     self.insert_khf(objid, khf)?;
+
+    //     Ok(())
+
+    // }
 
     /// Inserts a new `Khf` to track.
     pub fn insert_khf(
@@ -169,7 +189,7 @@ where
     H: Hasher<N>,
 {
     type Id = u64;
-    type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, N>, C, 4096, N>
+    type Io<'a> = BlockCryptIo<'a, P, R, C, H, N, 4096>
         where
             R: 'a,
             H: 'a,
@@ -180,45 +200,29 @@ where
     // Couldn't call the `open_object()` or `get_khf_mut()` functions because the compiler would
     // report multiple mutable borrows at a time. Was also too lazy to look into how to properly
     // implement split borrows for this problem.
-    fn open<'a>(&'a mut self, objid: Self::Id, mode: Mode) -> Result<Self::Io<'_>, Self::Error> {
-        self.load_khf(objid)?;
-
-        if matches!(mode, Mode::Write) {
-            self.master_khf
-                .update(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?)?;
-        }
-
-        let io = self
-            .storage
-            .open(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?, mode)
-            .map_err(|_| Error::Io)?;
-
-        let khf = self
-            .object_khfs
-            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
-            .ok_or(Error::MissingKhf)?;
-
-        Ok(BlockCryptIo::new(io, khf))
+    fn open(&mut self, objid: Self::Id) -> Result<Self::Io<'_>, Self::Error> {
+        Ok(BlockCryptIo::new(self, objid))
     }
 }
 
-// impl<Io, P, R, H, C, const N: usize> Persist<Io> for Lethe<R, H, C, N>
-// where
-//     R: Default,
-//     Io: Read + Write,
-// {
-//     type Error = Error;
+impl<Io, P, R, H, C, const N: usize> Persist<Io> for Lethe<P, R, H, C, N>
+where
+    R: Default,
+    for<'a> P: Serialize + Deserialize<'a>,
+    Io: Read + Write,
+{
+    type Error = Error;
 
-//     fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
-//         // TODO: Stream serialization.
-//         let ser = bincode::serialize(&self)?;
-//         sink.write_all(&ser).map_err(|_| Error::Io)
-//     }
+    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
+        // TODO: Stream serialization.
+        let ser = bincode::serialize(&self)?;
+        sink.write_all(&ser).map_err(|_| Error::Io)
+    }
 
-//     fn load(mut source: Io) -> Result<Self, Self::Error> {
-//         // TODO: Stream deserialization.
-//         let mut raw = vec![];
-//         source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
-//         Ok(bincode::deserialize(&raw)?)
-//     }
-// }
+    fn load(mut source: Io) -> Result<Self, Self::Error> {
+        // TODO: Stream deserialization.
+        let mut raw = vec![];
+        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
+        Ok(bincode::deserialize(&raw)?)
+    }
+}
