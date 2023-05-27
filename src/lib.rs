@@ -6,7 +6,7 @@ pub mod result;
 
 use alloc::Allocator;
 use crypter::Crypter;
-use datastore::PersistentStorage;
+use datastore::{Mode, PersistentStorage};
 use embedded_io::blocking::{Read, Seek, Write};
 use error::Error;
 use hasher::Hasher;
@@ -54,30 +54,35 @@ where
         }
     }
 
-    /// Opens an `Io` to an object.
-    fn open_object(&mut self, objid: u64) -> Result<P::Io<'_>, Error> {
+    /// Opens an `Io` to an object in the specified mode.
+    fn open_object(&mut self, objid: u64, mode: Mode) -> Result<P::Io<'_>, Error> {
         self.mappings
             .get(&objid)
-            .map(|mapped_objid| self.storage.open(*mapped_objid).map_err(|_| Error::Io))
+            .map(|mapped_objid| {
+                self.storage
+                    .open(*mapped_objid, mode)
+                    .map_err(|_| Error::Io)
+            })
             .ok_or(Error::MissingKhf)?
     }
 
     /// Loads a persisted object `Khf`.
     fn load_khf(&mut self, objid: u64) -> Result<(), Error> {
         // If the object `Khf` is already loaded, we're done.
-        if let Some(true) = self
-            .mappings
-            .get(&objid)
-            .map(|mapped_objid| self.object_khfs.contains_key(mapped_objid))
+        if self
+            .object_khfs
+            .contains_key(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
         {
             return Ok(());
         }
 
         // Construct the `Io` to load the object `Khf`.
-        let mapped_objid = self.mappings[&objid];
-        let key = self.master_khf.derive(mapped_objid)?;
-        let io =
-            CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(self.open_object(objid)?, key);
+        let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
+        let key = self.master_khf.derive(*mapped_objid)?;
+        let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(
+            self.open_object(objid, Mode::Read)?,
+            key,
+        );
 
         // Only IO errors should prevent the object `Khf` from being loaded.
         let khf = Khf::load(io)?;
@@ -105,20 +110,16 @@ where
     pub fn get_khf(&mut self, objid: u64) -> Result<Option<&Khf<R, H, N>>, Error> {
         self.load_khf(objid)?;
         Ok(self
-            .mappings
-            .get(&objid)
-            .map(|mapped_objid| self.object_khfs.get(mapped_objid))
-            .flatten())
+            .object_khfs
+            .get(self.mappings.get(&objid).ok_or(Error::MissingKhf)?))
     }
 
     /// Returns a mutable reference to an object `Khf`.
     pub fn get_khf_mut(&mut self, objid: u64) -> Result<Option<&mut Khf<R, H, N>>, Error> {
         self.load_khf(objid)?;
         Ok(self
-            .mappings
-            .get(&objid)
-            .map(|mapped_objid| self.object_khfs.get_mut(mapped_objid))
-            .flatten())
+            .object_khfs
+            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?))
     }
 
     /// Remove an object `Khf`.
@@ -176,20 +177,25 @@ where
             C: 'a;
     type Error = Error;
 
-    fn open<'a>(&'a mut self, objid: Self::Id) -> Result<Self::Io<'_>, Self::Error> {
+    // Couldn't call the `open_object()` or `get_khf_mut()` functions because the compiler would
+    // report multiple mutable borrows at a time. Was also too lazy to look into how to properly
+    // implement split borrows for this problem.
+    fn open<'a>(&'a mut self, objid: Self::Id, mode: Mode) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(objid)?;
 
+        if matches!(mode, Mode::Write) {
+            self.master_khf
+                .update(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?)?;
+        }
+
         let io = self
-            .mappings
-            .get(&objid)
-            .map(|mapped_objid| self.storage.open(*mapped_objid).map_err(|_| Error::Io))
-            .ok_or(Error::MissingKhf)??;
+            .storage
+            .open(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?, mode)
+            .map_err(|_| Error::Io)?;
 
         let khf = self
-            .mappings
-            .get(&objid)
-            .map(|mapped_objid| self.object_khfs.get_mut(mapped_objid))
-            .flatten()
+            .object_khfs
+            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
             .ok_or(Error::MissingKhf)?;
 
         Ok(BlockCryptIo::new(io, khf))

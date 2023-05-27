@@ -37,7 +37,7 @@ impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
     for BlockCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Seek,
-    KMS: KeyManagementScheme<KeyId = u64, Key = [u8; KEY_SZ]>,
+    KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     C: Crypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
