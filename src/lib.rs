@@ -183,42 +183,44 @@ where
     fn open<'a>(&'a mut self, objid: Self::Id, mode: Mode) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(objid)?;
 
+        let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
+
         if matches!(mode, Mode::Write) {
-            self.master_khf
-                .update(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?)?;
+            self.master_khf.update(*mapped_objid)?;
         }
 
         let io = self
             .storage
-            .open(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?, mode)
+            .open(*mapped_objid, mode)
             .map_err(|_| Error::Io)?;
 
         let khf = self
             .object_khfs
-            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
+            .get_mut(mapped_objid)
             .ok_or(Error::MissingKhf)?;
 
         Ok(BlockCryptIo::new(io, khf))
     }
 }
 
-// impl<Io, P, R, H, C, const N: usize> Persist<Io> for Lethe<R, H, C, N>
-// where
-//     R: Default,
-//     Io: Read + Write,
-// {
-//     type Error = Error;
+impl<Io, P, R, H, C, const N: usize> Persist<Io> for Lethe<P, R, H, C, N>
+where
+    R: Default,
+    for<'a> P: Serialize + Deserialize<'a>,
+    Io: Read + Write,
+{
+    type Error = Error;
 
-//     fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
-//         // TODO: Stream serialization.
-//         let ser = bincode::serialize(&self)?;
-//         sink.write_all(&ser).map_err(|_| Error::Io)
-//     }
+    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
+        // TODO: Stream serialization.
+        let ser = bincode::serialize(&self)?;
+        sink.write_all(&ser).map_err(|_| Error::Io)
+    }
 
-//     fn load(mut source: Io) -> Result<Self, Self::Error> {
-//         // TODO: Stream deserialization.
-//         let mut raw = vec![];
-//         source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
-//         Ok(bincode::deserialize(&raw)?)
-//     }
-// }
+    fn load(mut source: Io) -> Result<Self, Self::Error> {
+        // TODO: Stream deserialization.
+        let mut raw = vec![];
+        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
+        Ok(bincode::deserialize(&raw)?)
+    }
+}
