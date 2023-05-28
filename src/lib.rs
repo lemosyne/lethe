@@ -1,19 +1,17 @@
 mod alloc;
-mod datastore;
 pub mod error;
 pub mod io;
 pub mod result;
 
 use alloc::Allocator;
 use crypter::Crypter;
-use datastore::{Mode, PersistentStorage};
 use embedded_io::blocking::{Read, Seek, Write};
 use error::Error;
 use hasher::Hasher;
-use inachus::Persist;
 use io::{BlockCryptIo, CryptIo};
 use khf::Khf;
 use kms::KeyManagementScheme;
+use persistence::{Persist, PersistentStorage, StorageAccess};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, marker::PhantomData};
@@ -55,15 +53,10 @@ where
     }
 
     /// Opens an `Io` to an object in the specified mode.
-    fn open_object(&mut self, objid: u64, mode: Mode) -> Result<P::Io<'_>, Error> {
-        self.mappings
-            .get(&objid)
-            .map(|mapped_objid| {
-                self.storage
-                    .open(*mapped_objid, mode)
-                    .map_err(|_| Error::Io)
-            })
-            .ok_or(Error::MissingKhf)?
+    fn open_object(&mut self, objid: u64, access: StorageAccess) -> Result<P::Io<'_>, Error> {
+        self.storage
+            .open(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?, access)
+            .map_err(|_| Error::Io)
     }
 
     /// Loads a persisted object `Khf`.
@@ -80,7 +73,7 @@ where
         let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
         let key = self.master_khf.derive(*mapped_objid)?;
         let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(
-            self.open_object(objid, Mode::Read)?,
+            self.open_object(objid, StorageAccess::Read)?,
             key,
         );
 
@@ -180,18 +173,22 @@ where
     // Couldn't call the `open_object()` or `get_khf_mut()` functions because the compiler would
     // report multiple mutable borrows at a time. Was also too lazy to look into how to properly
     // implement split borrows for this problem.
-    fn open<'a>(&'a mut self, objid: Self::Id, mode: Mode) -> Result<Self::Io<'_>, Self::Error> {
+    fn open<'a>(
+        &'a mut self,
+        objid: Self::Id,
+        access: StorageAccess,
+    ) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(objid)?;
 
         let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
 
-        if matches!(mode, Mode::Write) {
+        if matches!(access, StorageAccess::Write) {
             self.master_khf.update(*mapped_objid)?;
         }
 
         let io = self
             .storage
-            .open(*mapped_objid, mode)
+            .open(*mapped_objid, access)
             .map_err(|_| Error::Io)?;
 
         let khf = self
