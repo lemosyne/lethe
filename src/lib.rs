@@ -11,7 +11,7 @@ use hasher::Hasher;
 use io::{BlockCryptIo, CryptIo};
 use khf::Khf;
 use kms::KeyManagementScheme;
-use persistence::{Persist, PersistentStorage, StorageAccess};
+use persistence::{Persist, PersistentStorage};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, marker::PhantomData};
@@ -52,13 +52,6 @@ where
         }
     }
 
-    /// Opens an `Io` to an object in the specified mode.
-    fn open_object(&mut self, objid: u64, access: StorageAccess) -> Result<P::Io<'_>, Error> {
-        self.storage
-            .open(*self.mappings.get(&objid).ok_or(Error::MissingKhf)?, access)
-            .map_err(|_| Error::Io)
-    }
-
     /// Loads a persisted object `Khf`.
     fn load_khf(&mut self, objid: u64) -> Result<(), Error> {
         // If the object `Khf` is already loaded, we're done.
@@ -73,7 +66,7 @@ where
         let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
         let key = self.master_khf.derive(*mapped_objid)?;
         let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, N>::new(
-            self.open_object(objid, StorageAccess::Read)?,
+            self.storage.read_handle(&objid).map_err(|_| Error::Io)?,
             key,
         );
 
@@ -170,33 +163,52 @@ where
             C: 'a;
     type Error = Error;
 
-    // Couldn't call the `open_object()` or `get_khf_mut()` functions because the compiler would
-    // report multiple mutable borrows at a time. Was also too lazy to look into how to properly
-    // implement split borrows for this problem.
-    fn open<'a>(
-        &'a mut self,
-        objid: Self::Id,
-        access: StorageAccess,
-    ) -> Result<Self::Io<'_>, Self::Error> {
-        self.load_khf(objid)?;
+    fn create(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
+        self.insert_khf(*objid, Khf::new(&[4, 4, 4, 4], R::default()))?;
+        self.storage.create(objid).map_err(|_| Error::Io)
+    }
+
+    fn destroy(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
+        self.remove_khf(*objid);
+        self.storage.destroy(objid).map_err(|_| Error::Io)
+    }
+
+    fn read_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
+        self.load_khf(*objid)?;
+
+        let khf = self
+            .object_khfs
+            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
+            .ok_or(Error::MissingKhf)?;
+
+        let io = self.storage.read_handle(objid).map_err(|_| Error::Io)?;
+
+        Ok(BlockCryptIo::new(io, khf))
+    }
+
+    fn write_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
+        self.load_khf(*objid)?;
 
         let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
 
-        if matches!(access, StorageAccess::Write) {
-            self.master_khf.update(*mapped_objid)?;
-        }
-
-        let io = self
-            .storage
-            .open(*mapped_objid, access)
-            .map_err(|_| Error::Io)?;
+        self.master_khf.update(*mapped_objid)?;
 
         let khf = self
             .object_khfs
             .get_mut(mapped_objid)
             .ok_or(Error::MissingKhf)?;
 
+        let io = self.storage.rw_handle(objid).map_err(|_| Error::Io)?;
+
         Ok(BlockCryptIo::new(io, khf))
+    }
+
+    fn rw_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
+        self.write_handle(objid)
+    }
+
+    fn truncate(&mut self, objid: &Self::Id, size: u64) -> Result<(), Self::Error> {
+        unimplemented!()
     }
 }
 
