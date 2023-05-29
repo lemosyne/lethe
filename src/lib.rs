@@ -131,6 +131,7 @@ where
     H: Hasher<KEY_SZ>,
 {
     type Id = u64;
+    type Flags = <P as PersistentStorage>::Flags;
     type Error = Error;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, KEY_SZ>, C, BLK_SZ, KEY_SZ>
         where
@@ -139,9 +140,9 @@ where
             P: 'a,
             C: 'a;
 
-    fn create(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
+    fn create(&mut self, objid: &Self::Id, flags: Self::Flags) -> Result<(), Self::Error> {
         self.insert_khf(*objid, Khf::new(&[4, 4, 4, 4], R::default()))?;
-        self.storage.create(objid).map_err(|_| Error::Io)
+        self.storage.create(objid, flags).map_err(|_| Error::Io)
     }
 
     fn destroy(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
