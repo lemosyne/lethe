@@ -151,8 +151,12 @@ where
         self.storage.destroy(objid).map_err(|_| Error::Io)
     }
 
-    fn info(&mut self, objid: &Self::Id) -> Result<Self::Info, Self::Error> {
-        self.storage.info(objid).map_err(|_| Error::Io)
+    fn get_info(&mut self, objid: &Self::Id) -> Result<Self::Info, Self::Error> {
+        self.storage.get_info(objid).map_err(|_| Error::Io)
+    }
+
+    fn set_info(&mut self, objid: &Self::Id, info: Self::Info) -> Result<(), Self::Error> {
+        self.storage.set_info(objid, info).map_err(|_| Error::Io)
     }
 
     fn read_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
