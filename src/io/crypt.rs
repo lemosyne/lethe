@@ -6,14 +6,14 @@ use embedded_io::{
 };
 use std::marker::PhantomData;
 
-pub struct CryptIo<IO, C, const N: usize> {
-    key: Key<N>,
+pub struct CryptIo<IO, C, const KEY_SZ: usize> {
+    key: Key<KEY_SZ>,
     io: IO,
     pd: PhantomData<C>,
 }
 
-impl<IO, C, const N: usize> CryptIo<IO, C, N> {
-    pub fn new(io: IO, key: Key<N>) -> Self {
+impl<IO, C, const KEY_SZ: usize> CryptIo<IO, C, KEY_SZ> {
+    pub fn new(io: IO, key: Key<KEY_SZ>) -> Self {
         Self {
             io,
             key,
@@ -22,14 +22,14 @@ impl<IO, C, const N: usize> CryptIo<IO, C, N> {
     }
 }
 
-impl<IO, C, const N: usize> Io for CryptIo<IO, C, N>
+impl<IO, C, const KEY_SZ: usize> Io for CryptIo<IO, C, KEY_SZ>
 where
     IO: Io,
 {
     type Error = IO::Error;
 }
 
-impl<IO, C, const N: usize> Read for CryptIo<IO, C, N>
+impl<IO, C, const KEY_SZ: usize> Read for CryptIo<IO, C, KEY_SZ>
 where
     IO: Read,
     C: Crypter,
@@ -47,7 +47,7 @@ where
     }
 }
 
-impl<IO, C, const N: usize> Write for CryptIo<IO, C, N>
+impl<IO, C, const KEY_SZ: usize> Write for CryptIo<IO, C, KEY_SZ>
 where
     IO: Write,
     C: Crypter,
@@ -62,7 +62,7 @@ where
     }
 }
 
-impl<IO, C, const N: usize> Seek for CryptIo<IO, C, N>
+impl<IO, C, const KEY_SZ: usize> Seek for CryptIo<IO, C, KEY_SZ>
 where
     IO: Seek,
     C: Crypter,
