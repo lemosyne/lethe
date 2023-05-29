@@ -132,6 +132,7 @@ where
 {
     type Id = u64;
     type Flags = <P as PersistentStorage>::Flags;
+    type Info = <P as PersistentStorage>::Info;
     type Error = Error;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, KEY_SZ>, C, BLK_SZ, KEY_SZ>
         where
@@ -148,6 +149,10 @@ where
     fn destroy(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
         self.remove_khf(*objid);
         self.storage.destroy(objid).map_err(|_| Error::Io)
+    }
+
+    fn info(&mut self, objid: &Self::Id) -> Result<Self::Info, Self::Error> {
+        self.storage.info(objid).map_err(|_| Error::Io)
     }
 
     fn read_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
