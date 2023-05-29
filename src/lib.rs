@@ -31,7 +31,7 @@ pub struct Lethe<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
     object_khfs: HashMap<u64, Khf<R, H, KEY_SZ>>,
     mappings: HashMap<u64, u64>,
     allocator: Allocator,
-    storage: P,
+    pub storage: P,
     pd: PhantomData<C>,
 }
 
@@ -131,13 +131,13 @@ where
     H: Hasher<KEY_SZ>,
 {
     type Id = u64;
+    type Error = Error;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, KEY_SZ>, C, BLK_SZ, KEY_SZ>
         where
             R: 'a,
             H: 'a,
             P: 'a,
             C: 'a;
-    type Error = Error;
 
     fn create(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
         self.insert_khf(*objid, Khf::new(&[4, 4, 4, 4], R::default()))?;
@@ -181,10 +181,6 @@ where
 
     fn rw_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
         self.write_handle(objid)
-    }
-
-    fn size(&mut self, objid: &Self::Id) -> Result<u64, Self::Error> {
-        self.storage.size(objid).map_err(|_| Error::Io)
     }
 
     fn truncate(&mut self, objid: &Self::Id, size: u64) -> Result<(), Self::Error> {
