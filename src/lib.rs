@@ -1,9 +1,7 @@
-mod alloc;
 pub mod error;
 pub mod io;
 pub mod result;
 
-use alloc::Allocator;
 use crypter::Crypter;
 use embedded_io::{
     blocking::{Read, Seek, Write},
@@ -29,8 +27,6 @@ pub struct Lethe<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
     #[serde(bound(serialize = "Khf<R, H, KEY_SZ>: Serialize"))]
     #[serde(bound(deserialize = "Khf<R, H, KEY_SZ>: Deserialize<'de>"))]
     object_khfs: HashMap<u64, Khf<R, H, KEY_SZ>>,
-    mappings: HashMap<u64, u64>,
-    allocator: Allocator,
     pub storage: P,
     pd: PhantomData<C>,
 }
@@ -48,8 +44,6 @@ where
         Self {
             master_khf: Khf::new(fanouts, R::default()),
             object_khfs: HashMap::new(),
-            mappings: HashMap::new(),
-            allocator: Allocator::new(),
             storage,
             pd: PhantomData,
         }
@@ -58,16 +52,12 @@ where
     /// Loads a persisted object `Khf`.
     fn load_khf(&mut self, objid: u64) -> Result<(), Error> {
         // If the object `Khf` is already loaded, we're done.
-        if self
-            .object_khfs
-            .contains_key(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
-        {
+        if self.object_khfs.contains_key(&objid) {
             return Ok(());
         }
 
         // Construct the `Io` to load the object `Khf`.
-        let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
-        let key = self.master_khf.derive(*mapped_objid)?;
+        let key = self.master_khf.derive(objid)?;
         let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, KEY_SZ>::new(
             self.storage.read_handle(&objid).map_err(|_| Error::Io)?,
             key,
@@ -86,38 +76,24 @@ where
         objid: u64,
         khf: Khf<R, H, KEY_SZ>,
     ) -> Result<Option<Khf<R, H, KEY_SZ>>, Error> {
-        if let Some(mapped_objid) = self.mappings.get(&objid) {
-            Ok(self.object_khfs.insert(*mapped_objid, khf))
-        } else {
-            let mapped_objid = self.allocator.alloc()?;
-            self.mappings.insert(objid, mapped_objid);
-            Ok(self.object_khfs.insert(mapped_objid, khf))
-        }
+        Ok(self.object_khfs.insert(objid, khf))
     }
 
     /// Returns an immutable reference to an object `Khf`.
     pub fn get_khf(&mut self, objid: u64) -> Result<Option<&Khf<R, H, KEY_SZ>>, Error> {
         self.load_khf(objid)?;
-        Ok(self
-            .object_khfs
-            .get(self.mappings.get(&objid).ok_or(Error::MissingKhf)?))
+        Ok(self.object_khfs.get(&objid))
     }
 
     /// Returns a mutable reference to an object `Khf`.
     pub fn get_khf_mut(&mut self, objid: u64) -> Result<Option<&mut Khf<R, H, KEY_SZ>>, Error> {
         self.load_khf(objid)?;
-        Ok(self
-            .object_khfs
-            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?))
+        Ok(self.object_khfs.get_mut(&objid))
     }
 
     /// Remove an object `Khf`.
     pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, KEY_SZ>> {
-        self.allocator.dealloc(objid);
-        self.mappings
-            .remove(&objid)
-            .map(|mapped_objid| self.object_khfs.remove(&mapped_objid))
-            .flatten()
+        self.object_khfs.remove(&objid)
     }
 }
 
@@ -161,31 +137,16 @@ where
 
     fn read_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(*objid)?;
-
-        let khf = self
-            .object_khfs
-            .get_mut(self.mappings.get(&objid).ok_or(Error::MissingKhf)?)
-            .ok_or(Error::MissingKhf)?;
-
+        let khf = self.object_khfs.get_mut(objid).ok_or(Error::MissingKhf)?;
         let io = self.storage.read_handle(objid).map_err(|_| Error::Io)?;
-
         Ok(BlockCryptIo::new(io, khf))
     }
 
     fn write_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(*objid)?;
-
-        let mapped_objid = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
-
-        self.master_khf.update(*mapped_objid)?;
-
-        let khf = self
-            .object_khfs
-            .get_mut(mapped_objid)
-            .ok_or(Error::MissingKhf)?;
-
+        self.master_khf.update(*objid)?;
+        let khf = self.object_khfs.get_mut(objid).ok_or(Error::MissingKhf)?;
         let io = self.storage.rw_handle(objid).map_err(|_| Error::Io)?;
-
         Ok(BlockCryptIo::new(io, khf))
     }
 
