@@ -19,6 +19,9 @@ use std::{collections::HashMap, marker::PhantomData};
 
 pub(crate) type Key<const N: usize> = [u8; N];
 
+const DEFAULT_MASTER_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
+const DEFAULT_OBJECT_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
+
 #[derive(Serialize, Deserialize)]
 pub struct Lethe<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
     #[serde(bound(serialize = "Khf<R, H, KEY_SZ>: Serialize"))]
@@ -27,6 +30,7 @@ pub struct Lethe<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
     #[serde(bound(serialize = "Khf<R, H, KEY_SZ>: Serialize"))]
     #[serde(bound(deserialize = "Khf<R, H, KEY_SZ>: Deserialize<'de>"))]
     object_khfs: HashMap<u64, Khf<R, H, KEY_SZ>>,
+    object_khf_fanouts: Vec<u64>,
     pub storage: P,
     pd: PhantomData<C>,
 }
@@ -40,13 +44,19 @@ where
     H: Hasher<KEY_SZ>,
 {
     /// Creates a new `Lethe` instance.
-    pub fn new(fanouts: &[u64], storage: P) -> Self {
+    pub fn new(storage: P) -> Self {
         Self {
-            master_khf: Khf::new(fanouts, R::default()),
+            master_khf: Khf::new(DEFAULT_MASTER_KHF_FANOUTS, R::default()),
             object_khfs: HashMap::new(),
+            object_khf_fanouts: DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
             storage,
             pd: PhantomData,
         }
+    }
+
+    /// Creates a new `LetheBuilder` instance.
+    pub fn options() -> LetheBuilder<P, R, C, H, KEY_SZ, BLK_SZ> {
+        LetheBuilder::new()
     }
 
     /// Loads a persisted object `Khf`.
@@ -118,7 +128,7 @@ where
             C: 'a;
 
     fn create(&mut self, objid: &Self::Id, flags: Self::Flags) -> Result<(), Self::Error> {
-        self.insert_khf(*objid, Khf::new(&[4, 4, 4, 4], R::default()))?;
+        self.insert_khf(*objid, Khf::new(&self.object_khf_fanouts, R::default()))?;
         self.storage.create(objid, flags).map_err(|_| Error::Io)
     }
 
@@ -204,5 +214,48 @@ where
         let mut raw = vec![];
         source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
         Ok(bincode::deserialize(&raw)?)
+    }
+}
+
+pub struct LetheBuilder<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
+    master_khf_fanouts: Vec<u64>,
+    object_khf_fanouts: Vec<u64>,
+    pd: PhantomData<(P, R, C, H)>,
+}
+
+impl<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> LetheBuilder<P, R, C, H, KEY_SZ, BLK_SZ>
+where
+    P: PersistentStorage<Id = u64>,
+    for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    R: RngCore + CryptoRng + Clone + Default,
+    C: Crypter,
+    H: Hasher<KEY_SZ>,
+{
+    pub fn new() -> Self {
+        Self {
+            master_khf_fanouts: DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
+            object_khf_fanouts: DEFAULT_OBJECT_KHF_FANOUTS.to_vec(),
+            pd: PhantomData,
+        }
+    }
+
+    pub fn master_khf_fanouts(&mut self, fanouts: &[u64]) -> &mut Self {
+        self.master_khf_fanouts = fanouts.to_vec();
+        self
+    }
+
+    pub fn object_khf_fanouts(&mut self, fanouts: &[u64]) -> &mut Self {
+        self.object_khf_fanouts = fanouts.to_vec();
+        self
+    }
+
+    pub fn build(&mut self, storage: P) -> Lethe<P, R, C, H, KEY_SZ, BLK_SZ> {
+        Lethe {
+            master_khf: Khf::new(&self.master_khf_fanouts, R::default()),
+            object_khfs: HashMap::new(),
+            object_khf_fanouts: self.object_khf_fanouts.clone(),
+            storage,
+            pd: PhantomData,
+        }
     }
 }
