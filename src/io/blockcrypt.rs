@@ -196,7 +196,8 @@ where
             let mut tmp_buf = vec![0; BLK_SZ];
             let off = block * BLK_SZ;
             self.io.seek(SeekFrom::Start(off as u64))?;
-            self.io.read(&mut tmp_buf)?;
+            let actually_read = self.io.read(&mut tmp_buf)?;
+            let actually_write = size.max(actually_read);
 
             let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
             let mut tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
@@ -205,7 +206,9 @@ where
 
             self.kms.update(block as u64).map_err(|_| ()).unwrap();
             let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-            let tmp_buf = C::onetime_encrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
+            let tmp_buf = C::onetime_encrypt(&key, &tmp_buf[..actually_write])
+                .map_err(|_| ())
+                .unwrap();
 
             self.io.seek(SeekFrom::Start(off as u64))?;
             let nbytes = self.io.write(&tmp_buf)?;
@@ -337,6 +340,30 @@ mod tests {
         blockio.read_exact(&mut buf)?;
 
         assert_eq!(&buf[..], &['a' as u8, 'b' as u8]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_too_much() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+        let mut blockio = BlockCryptIo::<
+            FromStd<NamedTempFile>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(FromStd::new(NamedTempFile::new()?), &mut khf);
+
+        blockio.write_all(&['a' as u8; 16])?;
+
+        let mut buf = vec![0; BLOCK_SIZE];
+        blockio.seek(SeekFrom::Start(0).into())?;
+        let n = blockio.read(&mut buf)?;
+
+        assert_eq!(n, 16);
+        assert_eq!(&buf[..n], &['a' as u8; 16]);
 
         Ok(())
     }
