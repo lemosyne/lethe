@@ -206,12 +206,10 @@ where
 
             self.kms.update(block as u64).map_err(|_| ()).unwrap();
             let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-            let tmp_buf = C::onetime_encrypt(&key, &tmp_buf[..actually_write])
-                .map_err(|_| ())
-                .unwrap();
+            let tmp_buf = C::onetime_encrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             self.io.seek(SeekFrom::Start(off as u64))?;
-            let nbytes = self.io.write(&tmp_buf)?;
+            let nbytes = self.io.write(&tmp_buf[..actually_write])?;
             total += size.min(nbytes as usize);
 
             if nbytes == 0 {
