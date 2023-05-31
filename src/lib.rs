@@ -2,6 +2,7 @@ pub mod error;
 pub mod io;
 pub mod result;
 
+use allocator::Allocator;
 use crypter::Crypter;
 use embedded_io::{
     blocking::{Read, Seek, Write},
@@ -23,25 +24,34 @@ const DEFAULT_MASTER_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
 const DEFAULT_OBJECT_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
 
 #[derive(Serialize, Deserialize)]
-pub struct Lethe<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
-    #[serde(bound(serialize = "Khf<R, H, KEY_SZ>: Serialize"))]
-    #[serde(bound(deserialize = "Khf<R, H, KEY_SZ>: Deserialize<'de>"))]
-    master_khf: Khf<R, H, KEY_SZ>,
-    #[serde(bound(serialize = "Khf<R, H, KEY_SZ>: Serialize"))]
-    #[serde(bound(deserialize = "Khf<R, H, KEY_SZ>: Deserialize<'de>"))]
-    object_khfs: HashMap<u64, Khf<R, H, KEY_SZ>>,
+pub struct Lethe<P, A, R, C, H, const E: usize, const D: usize> {
+    #[serde(bound(serialize = "Khf<R, H, E>: Serialize"))]
+    #[serde(bound(deserialize = "Khf<R, H, E>: Deserialize<'de>"))]
+    master_khf: Khf<R, H, E>,
+    #[serde(bound(serialize = "Khf<R, H, E>: Serialize"))]
+    #[serde(bound(deserialize = "Khf<R, H, E>: Deserialize<'de>"))]
+    object_khfs: HashMap<u64, Khf<R, H, E>>,
     object_khf_fanouts: Vec<u64>,
+    allocator: A,
+    mappings: HashMap<u64, MapEntry>,
     pub storage: P,
     pd: PhantomData<C>,
 }
 
-impl<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> Lethe<P, R, C, H, KEY_SZ, BLK_SZ>
+#[derive(Serialize, Deserialize)]
+struct MapEntry {
+    map_id: u64,
+    khf_id: u64,
+}
+
+impl<P, A, R, C, H, const E: usize, const D: usize> Lethe<P, A, R, C, H, E, D>
 where
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    A: Allocator<Id = u64> + Default,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
-    H: Hasher<KEY_SZ>,
+    H: Hasher<E>,
 {
     /// Creates a new `Lethe` instance.
     pub fn new(storage: P) -> Self {
@@ -49,33 +59,39 @@ where
             master_khf: Khf::new(DEFAULT_MASTER_KHF_FANOUTS, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
+            allocator: A::default(),
+            mappings: HashMap::new(),
             storage,
             pd: PhantomData,
         }
     }
 
     /// Creates a new `LetheBuilder` instance.
-    pub fn options() -> LetheBuilder<P, R, C, H, KEY_SZ, BLK_SZ> {
+    pub fn options() -> LetheBuilder<P, A, R, C, H, E, D> {
         LetheBuilder::new()
     }
 
     /// Loads a persisted object `Khf`.
     fn load_khf(&mut self, objid: u64) -> Result<(), Error> {
+        let entry = self.mappings.get(&objid).ok_or(Error::MissingKhf)?;
+
         // If the object `Khf` is already loaded, we're done.
-        if self.object_khfs.contains_key(&objid) {
+        if self.object_khfs.contains_key(&entry.khf_id) {
             return Ok(());
         }
 
         // Construct the `Io` to load the object `Khf`.
-        let key = self.master_khf.derive(objid)?;
-        let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, KEY_SZ>::new(
-            self.storage.read_handle(&objid).map_err(|_| Error::Io)?,
+        let key = self.master_khf.derive(entry.khf_id)?;
+        let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+            self.storage
+                .read_handle(&entry.map_id)
+                .map_err(|_| Error::Io)?,
             key,
         );
 
         // Only IO errors should prevent the object `Khf` from being loaded.
         let khf = Khf::load(io)?;
-        self.insert_khf(objid, khf)?;
+        self.object_khfs.insert(entry.khf_id, khf);
 
         Ok(())
     }
@@ -84,47 +100,66 @@ where
     pub fn insert_khf(
         &mut self,
         objid: u64,
-        khf: Khf<R, H, KEY_SZ>,
-    ) -> Result<Option<Khf<R, H, KEY_SZ>>, Error> {
-        Ok(self.object_khfs.insert(objid, khf))
+        khf: Khf<R, H, E>,
+    ) -> Result<Option<Khf<R, H, E>>, Error> {
+        let map_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
+        let khf_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
+        self.mappings.insert(objid, MapEntry { map_id, khf_id });
+        Ok(self.object_khfs.insert(khf_id, khf))
     }
 
     /// Returns an immutable reference to an object `Khf`.
-    pub fn get_khf(&mut self, objid: u64) -> Result<Option<&Khf<R, H, KEY_SZ>>, Error> {
+    pub fn get_khf(&mut self, objid: u64) -> Result<Option<&Khf<R, H, E>>, Error> {
         self.load_khf(objid)?;
-        Ok(self.object_khfs.get(&objid))
+        Ok(self
+            .mappings
+            .get(&objid)
+            .map(|entry| self.object_khfs.get(&entry.khf_id))
+            .flatten())
     }
 
     /// Returns a mutable reference to an object `Khf`.
-    pub fn get_khf_mut(&mut self, objid: u64) -> Result<Option<&mut Khf<R, H, KEY_SZ>>, Error> {
+    pub fn get_khf_mut(&mut self, objid: u64) -> Result<Option<&mut Khf<R, H, E>>, Error> {
         self.load_khf(objid)?;
-        Ok(self.object_khfs.get_mut(&objid))
+        Ok(self
+            .mappings
+            .get(&objid)
+            .map(|entry| self.object_khfs.get_mut(&entry.khf_id))
+            .flatten())
     }
 
     /// Remove an object `Khf`.
-    pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, KEY_SZ>> {
-        self.object_khfs.remove(&objid)
+    pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, E>> {
+        self.mappings
+            .remove(&objid)
+            .map(|entry| {
+                self.allocator.dealloc(entry.map_id).unwrap();
+                self.allocator.dealloc(entry.khf_id).unwrap();
+                self.object_khfs.remove(&entry.khf_id)
+            })
+            .flatten()
     }
 }
 
-impl<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> PersistentStorage
-    for Lethe<P, R, C, H, KEY_SZ, BLK_SZ>
+impl<P, A, R, C, H, const E: usize, const D: usize> PersistentStorage for Lethe<P, A, R, C, H, E, D>
 where
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    A: Allocator<Id = u64> + Default,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
-    H: Hasher<KEY_SZ>,
+    H: Hasher<E>,
 {
     type Id = u64;
     type Flags = <P as PersistentStorage>::Flags;
     type Info = <P as PersistentStorage>::Info;
     type Error = Error;
-    type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, KEY_SZ>, C, BLK_SZ, KEY_SZ>
+    type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, E>, C, D, E>
         where
+            P: 'a,
+            A: 'a,
             R: 'a,
             H: 'a,
-            P: 'a,
             C: 'a;
 
     fn create(&mut self, objid: &Self::Id, flags: Self::Flags) -> Result<(), Self::Error> {
@@ -166,13 +201,13 @@ where
 
     fn truncate(&mut self, objid: &Self::Id, size: u64) -> Result<(), Self::Error> {
         // Number of bytes past a block.
-        let extra = size % BLK_SZ as u64;
+        let extra = size % D as u64;
 
         // Need to rewrite the extra bytes.
         if extra > 0 {
             let mut io = self.rw_handle(objid)?;
             let mut buf = vec![0; extra as usize];
-            let offset = (size / BLK_SZ as u64) * BLK_SZ as u64;
+            let offset = (size / D as u64) * D as u64;
 
             // Read in the extra bytes.
             io.seek(SeekFrom::Start(offset)).map_err(|_| Error::Io)?;
@@ -184,7 +219,7 @@ where
         }
 
         // Truncate the forest. Not needed for security, but nice for efficiency.
-        let keys = (size + (BLK_SZ as u64 - 1)) / BLK_SZ as u64;
+        let keys = (size + (D as u64 - 1)) / D as u64;
         self.get_khf_mut(*objid)?
             .ok_or(Error::MissingKhf)?
             .truncate(keys);
@@ -194,12 +229,12 @@ where
     }
 }
 
-impl<Io, P, R, H, C, const KEY_SZ: usize, const BLK_SZ: usize> Persist<Io>
-    for Lethe<P, R, H, C, KEY_SZ, BLK_SZ>
+impl<Io, P, A, R, C, H, const E: usize, const D: usize> Persist<Io> for Lethe<P, A, R, C, H, E, D>
 where
-    R: Default,
-    for<'a> P: Serialize + Deserialize<'a>,
     Io: Read + Write,
+    for<'a> P: Serialize + Deserialize<'a>,
+    for<'a> A: Serialize + Deserialize<'a>,
+    R: Default,
 {
     type Error = Error;
 
@@ -217,19 +252,20 @@ where
     }
 }
 
-pub struct LetheBuilder<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> {
+pub struct LetheBuilder<P, A, R, C, H, const E: usize, const D: usize> {
     master_khf_fanouts: Vec<u64>,
     object_khf_fanouts: Vec<u64>,
-    pd: PhantomData<(P, R, C, H)>,
+    pd: PhantomData<(P, A, R, C, H)>,
 }
 
-impl<P, R, C, H, const KEY_SZ: usize, const BLK_SZ: usize> LetheBuilder<P, R, C, H, KEY_SZ, BLK_SZ>
+impl<P, A, R, C, H, const E: usize, const D: usize> LetheBuilder<P, A, R, C, H, E, D>
 where
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    A: Allocator<Id = u64> + Default,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
-    H: Hasher<KEY_SZ>,
+    H: Hasher<E>,
 {
     pub fn new() -> Self {
         Self {
@@ -249,11 +285,13 @@ where
         self
     }
 
-    pub fn build(&mut self, storage: P) -> Lethe<P, R, C, H, KEY_SZ, BLK_SZ> {
+    pub fn build(&mut self, storage: P) -> Lethe<P, A, R, C, H, E, D> {
         Lethe {
             master_khf: Khf::new(&self.master_khf_fanouts, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: self.object_khf_fanouts.clone(),
+            allocator: A::default(),
+            mappings: HashMap::new(),
             storage,
             pd: PhantomData,
         }

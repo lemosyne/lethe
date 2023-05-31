@@ -12,7 +12,7 @@ pub enum Error {
     Serde(#[from] bincode::Error),
 
     #[error("no more object ids")]
-    ObjIdAllocation,
+    Alloc,
 
     #[error(transparent)]
     Khf(#[from] khf::Error),

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+allocator = { git = "https://github.com/lemosyne/allocator.git" }
+bincode = "1.3.3"
 crypter = { git = "https://github.com/lemosyne/crypter.git" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
@@ -11,9 +13,8 @@ khf = { git = "https://github.com/lemosyne/khf.git" }
 kms = { git = "https://github.com/lemosyne/kms.git" }
 persistence = { git = "https://github.com/lemosyne/persistence.git" }
 rand = "0.8.5"
-thiserror = "1.0.40"
 serde = { version = "1.0.163", features = ["derive"] }
-bincode = "1.3.3"
+thiserror = "1.0.40"
 
 [dev-dependencies]
 anyhow = "1.0.71"
