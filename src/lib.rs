@@ -172,7 +172,6 @@ where
     type Flags = <P as PersistentStorage>::Flags;
     type Info = <P as PersistentStorage>::Info;
     type Error = Error;
-    type State = <P as PersistentStorage>::State;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, E>, C, D, E>
         where
             P: 'a,
@@ -247,7 +246,7 @@ where
         self.storage.truncate(objid, size).map_err(|_| Error::Io)
     }
 
-    fn persist_state(&mut self, state: Option<Self::State>) -> Result<(), Self::Error> {
+    fn persist_state(&mut self) -> Result<(), Self::Error> {
         // Persist the updated object `Khf`s.
         for khf_id in self.master_khf.commit() {
             let khf = &self.object_khfs[&khf_id];
@@ -302,10 +301,10 @@ where
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
-        self.storage.persist_state(state).map_err(|_| Error::Io)
+        self.storage.persist_state().map_err(|_| Error::Io)
     }
 
-    fn load_state(&mut self) -> Result<Option<Self::State>, Self::Error> {
+    fn load_state(&mut self) -> Result<(), Self::Error> {
         let state = self.storage.load_state().map_err(|_| Error::Io)?;
 
         // Load the master `Khf`.
