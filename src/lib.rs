@@ -117,18 +117,6 @@ where
         Ok(())
     }
 
-    /// Inserts a new `Khf` to track.
-    pub fn insert_khf(
-        &mut self,
-        objid: u64,
-        khf: Khf<R, H, E>,
-    ) -> Result<Option<Khf<R, H, E>>, Error> {
-        let map_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
-        let khf_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
-        self.mappings.insert(objid, MapEntry { map_id, khf_id });
-        Ok(self.object_khfs.insert(khf_id, khf))
-    }
-
     /// Returns an immutable reference to an object `Khf`.
     pub fn get_khf(&mut self, objid: u64) -> Result<Option<&Khf<R, H, E>>, Error> {
         self.load_khf(objid)?;
@@ -147,18 +135,6 @@ where
             .get(&objid)
             .map(|entry| self.object_khfs.get_mut(&entry.khf_id))
             .flatten())
-    }
-
-    /// Remove an object `Khf`.
-    pub fn remove_khf(&mut self, objid: u64) -> Option<Khf<R, H, E>> {
-        self.mappings
-            .remove(&objid)
-            .map(|entry| {
-                self.allocator.dealloc(entry.map_id).unwrap();
-                self.allocator.dealloc(entry.khf_id).unwrap();
-                self.object_khfs.remove(&entry.khf_id)
-            })
-            .flatten()
     }
 }
 
