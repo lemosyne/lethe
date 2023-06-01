@@ -11,8 +11,11 @@ pub enum Error {
     #[error(transparent)]
     Serde(#[from] bincode::Error),
 
-    #[error("no more object ids")]
+    #[error("couldn't allocate object ID")]
     Alloc,
+
+    #[error("couldn't deallocate object ID")]
+    Dealloc,
 
     #[error(transparent)]
     Khf(#[from] khf::Error),

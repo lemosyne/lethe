@@ -187,13 +187,31 @@ where
             C: 'a;
 
     fn create(&mut self, objid: &Self::Id, flags: Self::Flags) -> Result<(), Self::Error> {
-        self.insert_khf(*objid, Khf::new(&self.object_khf_fanouts, R::default()))?;
-        self.storage.create(objid, flags).map_err(|_| Error::Io)
+        let map_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
+        let khf_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
+
+        self.mappings.insert(*objid, MapEntry { map_id, khf_id });
+        self.object_khfs
+            .insert(khf_id, Khf::new(&self.object_khf_fanouts, R::default()));
+
+        self.storage.create(&map_id, flags).map_err(|_| Error::Io)
     }
 
     fn destroy(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
-        self.remove_khf(*objid);
-        self.storage.destroy(objid).map_err(|_| Error::Io)
+        if let Some(entry) = self.mappings.remove(objid) {
+            self.allocator
+                .dealloc(entry.map_id)
+                .map_err(|_| Error::Dealloc)?;
+            self.allocator
+                .dealloc(entry.khf_id)
+                .map_err(|_| Error::Dealloc)?;
+
+            self.object_khfs.remove(&entry.khf_id);
+
+            self.storage.destroy(&entry.map_id).map_err(|_| Error::Io)
+        } else {
+            Ok(())
+        }
     }
 
     fn get_info(&mut self, objid: &Self::Id) -> Result<Self::Info, Self::Error> {
@@ -206,16 +224,33 @@ where
 
     fn read_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(*objid)?;
-        let khf = self.object_khfs.get_mut(objid).ok_or(Error::MissingKhf)?;
-        let io = self.storage.read_handle(objid).map_err(|_| Error::Io)?;
+        let entry = self.mappings.get(objid).ok_or(Error::MissingKhf)?;
+        let khf = self
+            .object_khfs
+            .get_mut(&entry.khf_id)
+            .ok_or(Error::MissingKhf)?;
+        let io = self
+            .storage
+            .read_handle(&entry.map_id)
+            .map_err(|_| Error::Io)?;
         Ok(BlockCryptIo::new(io, khf))
     }
 
     fn write_handle(&mut self, objid: &Self::Id) -> Result<Self::Io<'_>, Self::Error> {
         self.load_khf(*objid)?;
-        self.master_khf.update(*objid)?;
-        let khf = self.object_khfs.get_mut(objid).ok_or(Error::MissingKhf)?;
-        let io = self.storage.rw_handle(objid).map_err(|_| Error::Io)?;
+
+        let entry = self.mappings.get(objid).ok_or(Error::MissingKhf)?;
+        let khf = self
+            .object_khfs
+            .get_mut(&entry.khf_id)
+            .ok_or(Error::MissingKhf)?;
+        let io = self
+            .storage
+            .rw_handle(&entry.map_id)
+            .map_err(|_| Error::Io)?;
+
+        self.master_khf.update(entry.khf_id)?;
+
         Ok(BlockCryptIo::new(io, khf))
     }
 
