@@ -43,7 +43,7 @@ pub struct Lethe<S, P, A, R, C, H, const E: usize, const D: usize> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct MapEntry {
+pub struct MapEntry {
     map_id: u64,
     khf_id: u64,
 }
@@ -115,6 +115,11 @@ where
         self.object_khfs.insert(entry.khf_id, khf);
 
         Ok(())
+    }
+
+    /// Returns the mapping of an object ID.
+    pub fn get_khf_mapping(&self, objid: u64) -> Option<&MapEntry> {
+        self.mappings.get(&objid)
     }
 
     /// Returns an immutable reference to an object `Khf`.
