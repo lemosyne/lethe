@@ -44,8 +44,8 @@ pub struct Lethe<S, P, A, R, C, H, const E: usize, const D: usize> {
 
 #[derive(Serialize, Deserialize)]
 pub struct MapEntry {
-    map_id: u64,
-    khf_id: u64,
+    pub map_id: u64,
+    pub khf_id: u64,
 }
 
 impl<S, P, A, R, C, H, const E: usize, const D: usize> Lethe<S, P, A, R, C, H, E, D>
