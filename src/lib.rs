@@ -30,17 +30,14 @@ const OBJECT_KHF_FANOUTS_OBJID: u64 = 1;
 const ALLOCATOR_OBJID: u64 = 2;
 const MAPPINGS_OBJID: u64 = 3;
 
-#[derive(Serialize, Deserialize)]
-pub struct Lethe<P, A, R, C, H, const E: usize, const D: usize> {
-    #[serde(bound(serialize = "Khf<R, H, E>: Serialize"))]
-    #[serde(bound(deserialize = "Khf<R, H, E>: Deserialize<'de>"))]
+pub struct Lethe<S, P, A, R, C, H, const E: usize, const D: usize> {
+    master_key: Key<E>,
     master_khf: Khf<R, H, E>,
-    #[serde(bound(serialize = "Khf<R, H, E>: Serialize"))]
-    #[serde(bound(deserialize = "Khf<R, H, E>: Deserialize<'de>"))]
     object_khfs: HashMap<u64, Khf<R, H, E>>,
     object_khf_fanouts: Vec<u64>,
     allocator: A,
     mappings: HashMap<u64, MapEntry>,
+    enclave: S,
     pub storage: P,
     pd: PhantomData<C>,
 }
@@ -51,8 +48,9 @@ struct MapEntry {
     khf_id: u64,
 }
 
-impl<P, A, R, C, H, const E: usize, const D: usize> Lethe<P, A, R, C, H, E, D>
+impl<S, P, A, R, C, H, const E: usize, const D: usize> Lethe<S, P, A, R, C, H, E, D>
 where
+    S: Read + Write + Seek,
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
     A: Allocator<Id = u64> + Default,
@@ -61,13 +59,18 @@ where
     H: Hasher<E>,
 {
     /// Creates a new `Lethe` instance.
-    pub fn new(storage: P) -> Self {
+    pub fn new(enclave: S, storage: P) -> Self {
+        let mut master_key = [0; E];
+        R::default().fill_bytes(&mut master_key);
+
         let mut lethe = Self {
+            master_key,
             master_khf: Khf::new(DEFAULT_MASTER_KHF_FANOUTS, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
             allocator: A::default(),
             mappings: HashMap::new(),
+            enclave,
             storage,
             pd: PhantomData,
         };
@@ -85,7 +88,7 @@ where
     }
 
     /// Creates a new `LetheBuilder` instance.
-    pub fn options() -> LetheBuilder<P, A, R, C, H, E, D> {
+    pub fn options() -> LetheBuilder<S, P, A, R, C, H, E, D> {
         LetheBuilder::new()
     }
 
@@ -159,8 +162,10 @@ where
     }
 }
 
-impl<P, A, R, C, H, const E: usize, const D: usize> PersistentStorage for Lethe<P, A, R, C, H, E, D>
+impl<S, P, A, R, C, H, const E: usize, const D: usize> PersistentStorage
+    for Lethe<S, P, A, R, C, H, E, D>
 where
+    S: Read + Write + Seek,
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
     for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
@@ -174,6 +179,7 @@ where
     type Error = Error;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, E>, C, D, E>
         where
+            S: 'a,
             P: 'a,
             A: 'a,
             R: 'a,
@@ -261,58 +267,89 @@ where
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
+        // Generate new master key.
+        R::default().fill_bytes(&mut self.master_key);
+
         // Persist the master `Khf`.
         {
-            let mut io = self
-                .storage
-                .write_handle(&MASTER_KHF_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .write_handle(&MASTER_KHF_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let ser = bincode::serialize(&self.master_khf)?;
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
         // Persist the object `Khf` fanouts.
         {
-            let mut io = self
-                .storage
-                .write_handle(&OBJECT_KHF_FANOUTS_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .write_handle(&OBJECT_KHF_FANOUTS_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let ser = bincode::serialize(&self.object_khf_fanouts)?;
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
         // Persist the allocator.
         {
-            let mut io = self
-                .storage
-                .write_handle(&ALLOCATOR_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .write_handle(&ALLOCATOR_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let ser = bincode::serialize(&self.allocator)?;
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
         // Persist the mappings.
         {
-            let mut io = self
-                .storage
-                .write_handle(&MAPPINGS_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .write_handle(&MAPPINGS_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let ser = bincode::serialize(&self.mappings)?;
             io.write_all(&ser).map_err(|_| Error::Io)?;
         }
 
+        // Persist the master key.
+        self.enclave
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| Error::Io)?;
+        self.enclave
+            .write_all(&self.master_key)
+            .map_err(|_| Error::Io)?;
+
+        // Persist state of the underlying storage.
         self.storage.persist_state().map_err(|_| Error::Io)
     }
 
     fn load_state(&mut self) -> Result<(), Self::Error> {
+        // Load state of the underlying storage.
         let state = self.storage.load_state().map_err(|_| Error::Io)?;
+
+        // Load the master key.
+        self.enclave
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| Error::Io)?;
+        self.enclave
+            .read_exact(&mut self.master_key)
+            .map_err(|_| Error::Io)?;
 
         // Load the master `Khf`.
         {
-            let mut io = self
-                .storage
-                .read_handle(&MASTER_KHF_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .read_handle(&MASTER_KHF_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
             self.master_khf = bincode::deserialize(&ser)?;
@@ -320,10 +357,12 @@ where
 
         // Load the object `Khf` fanouts.
         {
-            let mut io = self
-                .storage
-                .read_handle(&OBJECT_KHF_FANOUTS_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .read_handle(&OBJECT_KHF_FANOUTS_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
             self.object_khf_fanouts = bincode::deserialize(&ser)?;
@@ -331,10 +370,12 @@ where
 
         // Load the allocator.
         {
-            let mut io = self
-                .storage
-                .read_handle(&ALLOCATOR_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .read_handle(&ALLOCATOR_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
             self.allocator = bincode::deserialize(&ser)?;
@@ -342,10 +383,12 @@ where
 
         // Load the mappings.
         {
-            let mut io = self
-                .storage
-                .read_handle(&MAPPINGS_OBJID)
-                .map_err(|_| Error::Io)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage
+                    .read_handle(&MAPPINGS_OBJID)
+                    .map_err(|_| Error::Io)?,
+                self.master_key,
+            );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
             self.mappings = bincode::deserialize(&ser)?;
@@ -355,14 +398,15 @@ where
     }
 }
 
-pub struct LetheBuilder<P, A, R, C, H, const E: usize, const D: usize> {
+pub struct LetheBuilder<S, P, A, R, C, H, const E: usize, const D: usize> {
     master_khf_fanouts: Vec<u64>,
     object_khf_fanouts: Vec<u64>,
-    pd: PhantomData<(P, A, R, C, H)>,
+    pd: PhantomData<(S, P, A, R, C, H)>,
 }
 
-impl<P, A, R, C, H, const E: usize, const D: usize> LetheBuilder<P, A, R, C, H, E, D>
+impl<S, P, A, R, C, H, const E: usize, const D: usize> LetheBuilder<S, P, A, R, C, H, E, D>
 where
+    S: Read + Write + Seek,
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
     A: Allocator<Id = u64> + Default,
@@ -388,13 +432,18 @@ where
         self
     }
 
-    pub fn build(&mut self, storage: P) -> Lethe<P, A, R, C, H, E, D> {
+    pub fn build(&mut self, enclave: S, storage: P) -> Lethe<S, P, A, R, C, H, E, D> {
+        let mut master_key = [0; E];
+        R::default().fill_bytes(&mut master_key);
+
         let mut lethe = Lethe {
+            master_key,
             master_khf: Khf::new(&self.master_khf_fanouts, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: self.object_khf_fanouts.clone(),
             allocator: A::default(),
             mappings: HashMap::new(),
+            enclave,
             storage,
             pd: PhantomData,
         };
