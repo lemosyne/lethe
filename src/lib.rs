@@ -20,8 +20,15 @@ use std::{collections::HashMap, marker::PhantomData};
 
 pub(crate) type Key<const N: usize> = [u8; N];
 
+// Default `Khf` fanouts.
 const DEFAULT_MASTER_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
 const DEFAULT_OBJECT_KHF_FANOUTS: &[u64; 4] = &[4, 4, 4, 4];
+
+// Reserved object IDs.
+const MASTER_KHF_OBJID: u64 = 0;
+const OBJECT_KHF_FANOUTS_OBJID: u64 = 1;
+const ALLOCATOR_OBJID: u64 = 2;
+const MAPPINGS_OBJID: u64 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct Lethe<P, A, R, C, H, const E: usize, const D: usize> {
@@ -55,7 +62,7 @@ where
 {
     /// Creates a new `Lethe` instance.
     pub fn new(storage: P) -> Self {
-        Self {
+        let mut lethe = Self {
             master_khf: Khf::new(DEFAULT_MASTER_KHF_FANOUTS, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: DEFAULT_MASTER_KHF_FANOUTS.to_vec(),
@@ -63,7 +70,18 @@ where
             mappings: HashMap::new(),
             storage,
             pd: PhantomData,
+        };
+
+        for id in [
+            MASTER_KHF_OBJID,
+            OBJECT_KHF_FANOUTS_OBJID,
+            ALLOCATOR_OBJID,
+            MAPPINGS_OBJID,
+        ] {
+            lethe.allocator.reserve(id).unwrap();
         }
+
+        lethe
     }
 
     /// Creates a new `LetheBuilder` instance.
@@ -145,7 +163,7 @@ impl<P, A, R, C, H, const E: usize, const D: usize> PersistentStorage for Lethe<
 where
     P: PersistentStorage<Id = u64>,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
-    A: Allocator<Id = u64> + Default,
+    for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
     H: Hasher<E>,
@@ -154,6 +172,7 @@ where
     type Flags = <P as PersistentStorage>::Flags;
     type Info = <P as PersistentStorage>::Info;
     type Error = Error;
+    type State = <P as PersistentStorage>::State;
     type Io<'a> = BlockCryptIo<'a, P::Io<'a>, Khf<R, H, E>, C, D, E>
         where
             P: 'a,
@@ -227,28 +246,113 @@ where
         // Truncate the object itself.
         self.storage.truncate(objid, size).map_err(|_| Error::Io)
     }
-}
 
-impl<Io, P, A, R, C, H, const E: usize, const D: usize> Persist<Io> for Lethe<P, A, R, C, H, E, D>
-where
-    Io: Read + Write,
-    for<'a> P: Serialize + Deserialize<'a>,
-    for<'a> A: Serialize + Deserialize<'a>,
-    R: Default,
-{
-    type Error = Error;
+    fn persist_state(&mut self, state: Option<Self::State>) -> Result<(), Self::Error> {
+        // Persist the updated object `Khf`s.
+        for khf_id in self.master_khf.commit() {
+            let khf = &self.object_khfs[&khf_id];
+            let ser = bincode::serialize(khf)?;
 
-    fn persist(&mut self, mut sink: Io) -> Result<(), Self::Error> {
-        // TODO: Stream serialization.
-        let ser = bincode::serialize(&self)?;
-        sink.write_all(&ser).map_err(|_| Error::Io)
+            let key = self.master_khf.derive(khf_id)?;
+            let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
+                self.storage.write_handle(&khf_id).map_err(|_| Error::Io)?,
+                key,
+            );
+
+            io.write_all(&ser).map_err(|_| Error::Io)?;
+        }
+
+        // Persist the master `Khf`.
+        {
+            let mut io = self
+                .storage
+                .write_handle(&MASTER_KHF_OBJID)
+                .map_err(|_| Error::Io)?;
+            let ser = bincode::serialize(&self.master_khf)?;
+            io.write_all(&ser).map_err(|_| Error::Io)?;
+        }
+
+        // Persist the object `Khf` fanouts.
+        {
+            let mut io = self
+                .storage
+                .write_handle(&OBJECT_KHF_FANOUTS_OBJID)
+                .map_err(|_| Error::Io)?;
+            let ser = bincode::serialize(&self.object_khf_fanouts)?;
+            io.write_all(&ser).map_err(|_| Error::Io)?;
+        }
+
+        // Persist the allocator.
+        {
+            let mut io = self
+                .storage
+                .write_handle(&ALLOCATOR_OBJID)
+                .map_err(|_| Error::Io)?;
+            let ser = bincode::serialize(&self.allocator)?;
+            io.write_all(&ser).map_err(|_| Error::Io)?;
+        }
+
+        // Persist the mappings.
+        {
+            let mut io = self
+                .storage
+                .write_handle(&MAPPINGS_OBJID)
+                .map_err(|_| Error::Io)?;
+            let ser = bincode::serialize(&self.mappings)?;
+            io.write_all(&ser).map_err(|_| Error::Io)?;
+        }
+
+        self.storage.persist_state(state).map_err(|_| Error::Io)
     }
 
-    fn load(mut source: Io) -> Result<Self, Self::Error> {
-        // TODO: Stream deserialization.
-        let mut raw = vec![];
-        source.read_to_end(&mut raw).map_err(|_| Error::Io)?;
-        Ok(bincode::deserialize(&raw)?)
+    fn load_state(&mut self) -> Result<Option<Self::State>, Self::Error> {
+        let state = self.storage.load_state().map_err(|_| Error::Io)?;
+
+        // Load the master `Khf`.
+        {
+            let mut io = self
+                .storage
+                .read_handle(&MASTER_KHF_OBJID)
+                .map_err(|_| Error::Io)?;
+            let mut ser = vec![];
+            io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
+            self.master_khf = bincode::deserialize(&ser)?;
+        }
+
+        // Load the object `Khf` fanouts.
+        {
+            let mut io = self
+                .storage
+                .read_handle(&OBJECT_KHF_FANOUTS_OBJID)
+                .map_err(|_| Error::Io)?;
+            let mut ser = vec![];
+            io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
+            self.object_khf_fanouts = bincode::deserialize(&ser)?;
+        }
+
+        // Load the allocator.
+        {
+            let mut io = self
+                .storage
+                .read_handle(&ALLOCATOR_OBJID)
+                .map_err(|_| Error::Io)?;
+            let mut ser = vec![];
+            io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
+            self.allocator = bincode::deserialize(&ser)?;
+        }
+
+        // Load the mappings.
+        {
+            let mut io = self
+                .storage
+                .read_handle(&MAPPINGS_OBJID)
+                .map_err(|_| Error::Io)?;
+            let mut ser = vec![];
+            io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
+            self.mappings = bincode::deserialize(&ser)?;
+        }
+
+        Ok(state)
     }
 }
 
@@ -286,7 +390,7 @@ where
     }
 
     pub fn build(&mut self, storage: P) -> Lethe<P, A, R, C, H, E, D> {
-        Lethe {
+        let mut lethe = Lethe {
             master_khf: Khf::new(&self.master_khf_fanouts, R::default()),
             object_khfs: HashMap::new(),
             object_khf_fanouts: self.object_khf_fanouts.clone(),
@@ -294,6 +398,17 @@ where
             mappings: HashMap::new(),
             storage,
             pd: PhantomData,
+        };
+
+        for id in [
+            MASTER_KHF_OBJID,
+            OBJECT_KHF_FANOUTS_OBJID,
+            ALLOCATOR_OBJID,
+            MAPPINGS_OBJID,
+        ] {
+            lethe.allocator.reserve(id).unwrap();
         }
+
+        lethe
     }
 }
