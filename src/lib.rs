@@ -175,7 +175,7 @@ where
         self.object_khfs
             .insert(khf_id, Khf::new(&self.object_khf_fanouts, R::default()));
 
-        self.master_khf.update(map_id)?;
+        self.master_khf.update(khf_id)?;
 
         self.storage
             .create(&khf_id, &flags)
