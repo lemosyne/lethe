@@ -30,7 +30,17 @@ const OBJECT_KHF_FANOUTS_OBJID: u64 = 1;
 const ALLOCATOR_OBJID: u64 = 2;
 const MAPPINGS_OBJID: u64 = 3;
 
-pub struct Lethe<S, P, A, R, C, H, const E: usize, const D: usize> {
+pub struct Lethe<S, P, A, R, C, H, const E: usize, const D: usize>
+where
+    S: Read + Write + Seek,
+    P: PersistentStorage<Id = u64>,
+    <P as PersistentStorage>::Flags: Default,
+    for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
+    R: RngCore + CryptoRng + Clone + Default,
+    C: Crypter,
+    H: Hasher<E>,
+{
     master_key: Key<E>,
     master_khf: Khf<R, H, E>,
     object_khfs: HashMap<u64, Khf<R, H, E>>,
@@ -54,7 +64,7 @@ where
     P: PersistentStorage<Id = u64>,
     <P as PersistentStorage>::Flags: Default,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
-    A: Allocator<Id = u64> + Default,
+    for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
     H: Hasher<E>,
@@ -110,7 +120,7 @@ where
         let key = self.master_khf.derive(entry.khf_id)?;
         let io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
             self.storage
-                .read_handle(&entry.map_id)
+                .read_handle(&entry.khf_id)
                 .map_err(|_| Error::Io)?,
             key,
         );
@@ -180,11 +190,10 @@ where
         self.mappings.insert(*objid, MapEntry { map_id, khf_id });
         self.object_khfs
             .insert(khf_id, Khf::new(&self.object_khf_fanouts, R::default()));
-
         self.master_khf.update(khf_id)?;
 
         self.storage
-            .create(&khf_id, &flags)
+            .create(&khf_id, &<P as PersistentStorage>::Flags::default())
             .map_err(|_| Error::Io)?;
         self.storage
             .create(&map_id, &flags)
@@ -286,9 +295,10 @@ where
     fn persist_state(&mut self) -> Result<(), Self::Error> {
         // Persist the updated object `Khf`s.
         for khf_id in self.master_khf.commit() {
-            let khf = &self.object_khfs[&khf_id];
-            let ser = bincode::serialize(khf)?;
+            let khf = self.object_khfs.get_mut(&khf_id).unwrap();
+            khf.commit();
 
+            let ser = bincode::serialize(khf)?;
             let key = self.master_khf.derive(khf_id)?;
             let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
                 self.storage.write_handle(&khf_id).map_err(|_| Error::Io)?,
@@ -437,6 +447,22 @@ where
     }
 }
 
+impl<S, P, A, R, C, H, const E: usize, const D: usize> Drop for Lethe<S, P, A, R, C, H, E, D>
+where
+    S: Read + Write + Seek,
+    P: PersistentStorage<Id = u64>,
+    <P as PersistentStorage>::Flags: Default,
+    for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
+    for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
+    R: RngCore + CryptoRng + Clone + Default,
+    C: Crypter,
+    H: Hasher<E>,
+{
+    fn drop(&mut self) {
+        self.persist_state().unwrap();
+    }
+}
+
 pub struct LetheBuilder<S, P, A, R, C, H, const E: usize, const D: usize> {
     master_khf_fanouts: Vec<u64>,
     object_khf_fanouts: Vec<u64>,
@@ -449,7 +475,7 @@ where
     P: PersistentStorage<Id = u64>,
     <P as PersistentStorage>::Flags: Default,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
-    A: Allocator<Id = u64> + Default,
+    for<'a> A: Allocator<Id = u64> + Default + Serialize + Deserialize<'a>,
     R: RngCore + CryptoRng + Clone + Default,
     C: Crypter,
     H: Hasher<E>,
