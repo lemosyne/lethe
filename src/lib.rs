@@ -447,6 +447,7 @@ impl<S, P, A, R, C, H, const E: usize, const D: usize> LetheBuilder<S, P, A, R, 
 where
     S: Read + Write + Seek,
     P: PersistentStorage<Id = u64>,
+    <P as PersistentStorage>::Flags: Default,
     for<'a> <P as PersistentStorage>::Io<'a>: Read + Write + Seek,
     A: Allocator<Id = u64> + Default,
     R: RngCore + CryptoRng + Clone + Default,
@@ -494,6 +495,10 @@ where
             MAPPINGS_OBJID,
         ] {
             lethe.allocator.reserve(id).unwrap();
+            lethe
+                .storage
+                .create(&id, &<P as PersistentStorage>::Flags::default())
+                .unwrap();
         }
 
         lethe
