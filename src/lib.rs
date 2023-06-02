@@ -348,69 +348,77 @@ where
 
     fn load_state(&mut self) -> Result<(), Self::Error> {
         // Load state of the underlying storage.
-        let state = self.storage.load_state().map_err(|_| Error::Io)?;
+        self.storage.load_state().map_err(|_| Error::Io)?;
 
         // Load the master key.
+        let mut master_key = [0; E];
         self.enclave
             .seek(SeekFrom::Start(0))
             .map_err(|_| Error::Io)?;
         self.enclave
-            .read_exact(&mut self.master_key)
+            .read_exact(&mut master_key)
             .map_err(|_| Error::Io)?;
 
         // Load the master `Khf`.
-        {
+        let master_khf = {
             let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
                 self.storage
                     .read_handle(&MASTER_KHF_OBJID)
                     .map_err(|_| Error::Io)?,
-                self.master_key,
+                master_key,
             );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
-            self.master_khf = bincode::deserialize(&ser)?;
-        }
+            bincode::deserialize(&ser)?
+        };
 
         // Load the object `Khf` fanouts.
-        {
+        let object_khf_fanouts = {
             let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
                 self.storage
                     .read_handle(&OBJECT_KHF_FANOUTS_OBJID)
                     .map_err(|_| Error::Io)?,
-                self.master_key,
+                master_key,
             );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
-            self.object_khf_fanouts = bincode::deserialize(&ser)?;
-        }
+            bincode::deserialize(&ser)?
+        };
 
         // Load the allocator.
-        {
+        let allocator = {
             let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
                 self.storage
                     .read_handle(&ALLOCATOR_OBJID)
                     .map_err(|_| Error::Io)?,
-                self.master_key,
+                master_key,
             );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
-            self.allocator = bincode::deserialize(&ser)?;
-        }
+            bincode::deserialize(&ser)?
+        };
 
         // Load the mappings.
-        {
+        let mappings = {
             let mut io = CryptIo::<<P as PersistentStorage>::Io<'_>, C, E>::new(
                 self.storage
                     .read_handle(&MAPPINGS_OBJID)
                     .map_err(|_| Error::Io)?,
-                self.master_key,
+                master_key,
             );
             let mut ser = vec![];
             io.read_to_end(&mut ser).map_err(|_| Error::Io)?;
-            self.mappings = bincode::deserialize(&ser)?;
-        }
+            bincode::deserialize(&ser)?
+        };
 
-        Ok(state)
+        // Update state after all the fallible operations.
+        self.master_key = master_key;
+        self.master_khf = master_khf;
+        self.object_khf_fanouts = object_khf_fanouts;
+        self.allocator = allocator;
+        self.mappings = mappings;
+
+        Ok(())
     }
 }
 
