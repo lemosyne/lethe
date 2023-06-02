@@ -167,7 +167,7 @@ where
             H: 'a,
             C: 'a;
 
-    fn create(&mut self, objid: &Self::Id, flags: Self::Flags) -> Result<(), Self::Error> {
+    fn create(&mut self, objid: &Self::Id, flags: &Self::Flags) -> Result<(), Self::Error> {
         let map_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
         let khf_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
 
@@ -177,7 +177,14 @@ where
 
         self.master_khf.update(map_id)?;
 
-        self.storage.create(&map_id, flags).map_err(|_| Error::Io)
+        self.storage
+            .create(&khf_id, &flags)
+            .map_err(|_| Error::Io)?;
+        self.storage
+            .create(&map_id, &flags)
+            .map_err(|_| Error::Io)?;
+
+        Ok(())
     }
 
     fn destroy(&mut self, objid: &Self::Id) -> Result<(), Self::Error> {
@@ -191,10 +198,10 @@ where
 
             self.object_khfs.remove(&entry.khf_id);
 
-            self.storage.destroy(&entry.map_id).map_err(|_| Error::Io)
-        } else {
-            Ok(())
+            self.storage.destroy(&entry.khf_id).map_err(|_| Error::Io)?;
+            self.storage.destroy(&entry.map_id).map_err(|_| Error::Io)?;
         }
+        Ok(())
     }
 
     fn get_info(&mut self, objid: &Self::Id) -> Result<Self::Info, Self::Error> {
