@@ -7,39 +7,39 @@ use embedded_io::{
 use kms::KeyManagementScheme;
 use std::marker::PhantomData;
 
-pub struct BlockRecryptIo<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> {
+pub struct BlockRecryptIo<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
-    old_kms: &'a mut OKMS,
-    new_kms: &'a mut NKMS,
+    curr_kms: &'a mut CKMS,
+    next_kms: &'a mut NKMS,
     pd: PhantomData<C>,
 }
 
-impl<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize>
-    BlockRecryptIo<'a, IO, OKMS, NKMS, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize>
+    BlockRecryptIo<'a, IO, CKMS, NKMS, C, BLK_SZ, KEY_SZ>
 {
-    pub fn new(io: IO, old_kms: &'a mut OKMS, new_kms: &'a mut NKMS) -> Self {
+    pub fn new(io: IO, curr_kms: &'a mut CKMS, next_kms: &'a mut NKMS) -> Self {
         Self {
             io,
-            old_kms,
-            new_kms,
+            curr_kms,
+            next_kms,
             pd: PhantomData,
         }
     }
 }
 
-impl<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
-    for BlockRecryptIo<'a, IO, OKMS, NKMS, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
+    for BlockRecryptIo<'a, IO, CKMS, NKMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Io,
 {
     type Error = IO::Error;
 }
 
-impl<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
-    for BlockRecryptIo<'a, IO, OKMS, NKMS, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
+    for BlockRecryptIo<'a, IO, CKMS, NKMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Seek,
-    OKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
+    CKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     NKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     C: Crypter,
 {
@@ -68,7 +68,7 @@ where
                 return Ok(0);
             }
 
-            let key = self.old_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.curr_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             buf[..actually_read].copy_from_slice(&tmp_buf[fill..fill + actually_read]);
@@ -94,7 +94,7 @@ where
                 return Ok(total);
             }
 
-            let key = self.old_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.curr_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             buf[total..total + nbytes].copy_from_slice(&tmp_buf[..nbytes]);
@@ -110,11 +110,11 @@ where
     }
 }
 
-impl<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
-    for BlockRecryptIo<'a, IO, OKMS, NKMS, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
+    for BlockRecryptIo<'a, IO, CKMS, NKMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Write + Seek,
-    OKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
+    CKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     NKMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     C: Crypter,
 {
@@ -144,12 +144,12 @@ where
                 return Ok(0);
             }
 
-            let key = self.old_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.curr_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let mut tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             tmp_buf[fill..fill + rest].copy_from_slice(&buf[..rest]);
 
-            let key = self.new_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.next_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let tmp_buf = C::onetime_encrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             let amount = nbytes.max(fill + rest);
@@ -171,7 +171,7 @@ where
         // block-by-block.
         while size > 0 && size / BLK_SZ > 0 && offset % BLK_SZ == 0 {
             let block = offset / BLK_SZ;
-            let key = self.new_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.next_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let tmp_buf = C::onetime_encrypt(&key, &buf[total..total + BLK_SZ])
                 .map_err(|_| ())
                 .unwrap();
@@ -201,12 +201,12 @@ where
             let actually_read = self.io.read(&mut tmp_buf)?;
             let actually_write = size.max(actually_read);
 
-            let key = self.old_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.curr_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let mut tmp_buf = C::onetime_decrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             tmp_buf[..size].copy_from_slice(&buf[total..total + size]);
 
-            let key = self.new_kms.derive(block as u64).map_err(|_| ()).unwrap();
+            let key = self.next_kms.derive(block as u64).map_err(|_| ()).unwrap();
             let tmp_buf = C::onetime_encrypt(&key, &tmp_buf).map_err(|_| ()).unwrap();
 
             self.io.seek(SeekFrom::Start(off as u64))?;
@@ -229,8 +229,8 @@ where
     }
 }
 
-impl<'a, IO, OKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
-    for BlockRecryptIo<'a, IO, OKMS, NKMS, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, CKMS, NKMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
+    for BlockRecryptIo<'a, IO, CKMS, NKMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Seek,
 {

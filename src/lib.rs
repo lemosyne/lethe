@@ -10,8 +10,8 @@ use embedded_io::{
 };
 use error::Error;
 use hasher::Hasher;
-use io::{BlockCryptIo, CryptIo};
-use khf::Khf;
+use io::{BlockCryptIo, BlockRecryptIo, CryptIo};
+use khf::{Consolidation, Khf};
 use kms::KeyManagementScheme;
 use persistence::{Persist, PersistentStorage};
 use rand::{CryptoRng, RngCore};
@@ -155,6 +155,58 @@ where
             .get(&objid)
             .map(|entry| self.object_khfs.get_mut(&entry.khf_id))
             .flatten())
+    }
+
+    /// Returns an immutable reference to the master `Khf`.
+    pub fn get_master_khf(&self) -> &Khf<R, H, E> {
+        &self.master_khf
+    }
+
+    /// Consolidates an object `Khf` using the specified `mechanism`.
+    pub fn consolidate_khf(&mut self, objid: u64, mechanism: Consolidation) -> Result<(), Error> {
+        self.load_khf(objid)?;
+
+        if let Some(entry) = self.mappings.get(&objid) {
+            let mut curr_khf = self.object_khfs.get_mut(&entry.khf_id).unwrap();
+            let mut next_khf = curr_khf.clone();
+            let blocks = next_khf.consolidate(mechanism);
+
+            let mut io = BlockRecryptIo::<
+                <P as PersistentStorage>::Io<'_>,
+                Khf<R, H, E>,
+                Khf<R, H, E>,
+                C,
+                D,
+                E,
+            >::new(
+                self.storage
+                    .read_handle(&entry.khf_id)
+                    .map_err(|_| Error::Io)?,
+                &mut curr_khf,
+                &mut next_khf,
+            );
+
+            for block in blocks {
+                let mut buf = [0; D];
+
+                io.seek(SeekFrom::Start(block * D as u64))
+                    .map_err(|_| Error::Io)?;
+                let n = io.read(&mut buf).map_err(|_| Error::Io)?;
+
+                io.seek(SeekFrom::Start(block * D as u64))
+                    .map_err(|_| Error::Io)?;
+                io.write_all(&buf[..n]).map_err(|_| Error::Io)?;
+            }
+
+            *curr_khf = next_khf;
+        }
+
+        Ok(())
+    }
+
+    /// Consolidates the master `Khf` using the specified `mechanism`.
+    pub fn consolidate_master_khf(&mut self, mechanism: Consolidation) {
+        self.master_khf.consolidate(mechanism);
     }
 }
 
