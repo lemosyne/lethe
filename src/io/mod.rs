@@ -1,5 +1,7 @@
 mod blockcrypt;
-pub use blockcrypt::BlockCryptIo;
-
 mod crypt;
+mod recrypt;
+
+pub use blockcrypt::BlockCryptIo;
 pub use crypt::CryptIo;
+pub use recrypt::BlockRecryptIo;
