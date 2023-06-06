@@ -238,3 +238,111 @@ where
         self.io.seek(pos)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::BlockCryptIo;
+    use anyhow::Result;
+    use crypter::openssl::Aes256Ctr;
+    use embedded_io::{
+        adapters::FromStd,
+        blocking::{Read, Seek, Write},
+        SeekFrom,
+    };
+    use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+    use khf::{Consolidation, Khf};
+    use rand::rngs::ThreadRng;
+    use std::fs::{self, File};
+
+    const BLOCK_SIZE: usize = 4096;
+    const KEY_SIZE: usize = SHA3_256_MD_SIZE;
+
+    #[test]
+    fn it_works() -> Result<()> {
+        let mut curr_khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+        let mut io = BlockCryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open("/tmp/block_recrypt_test")?,
+            ),
+            &mut curr_khf,
+        );
+
+        io.write_all(&['a' as u8; 4 * BLOCK_SIZE])?;
+        io.seek(SeekFrom::Start(BLOCK_SIZE as u64))?;
+        io.write_all(&['b' as u8; 2 * BLOCK_SIZE])?;
+
+        let mut next_khf = curr_khf.clone();
+        let blocks = next_khf.consolidate(Consolidation::Full);
+
+        let mut io = BlockRecryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .open("/tmp/block_recrypt_test")?,
+            ),
+            &mut curr_khf,
+            &mut next_khf,
+        );
+
+        for block in blocks {
+            let mut buf = [0; BLOCK_SIZE];
+
+            io.seek(SeekFrom::Start(block * BLOCK_SIZE as u64))?;
+            let n = io.read(&mut buf)?;
+
+            io.seek(SeekFrom::Start(block * BLOCK_SIZE as u64))?;
+            io.write_all(&buf[..n])?;
+        }
+
+        let mut io = BlockCryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .open("/tmp/block_recrypt_test")?,
+            ),
+            &mut next_khf,
+        );
+
+        let mut buf = vec![0; 4 * BLOCK_SIZE];
+        io.read_exact(&mut buf)?;
+
+        assert_eq!(&buf[..BLOCK_SIZE], &['a' as u8; BLOCK_SIZE]);
+        assert_eq!(
+            &buf[BLOCK_SIZE..3 * BLOCK_SIZE],
+            &['b' as u8; 2 * BLOCK_SIZE]
+        );
+        assert_eq!(&buf[3 * BLOCK_SIZE..], &['a' as u8; BLOCK_SIZE]);
+
+        fs::remove_file("/tmp/block_recrypt_test")?;
+
+        Ok(())
+    }
+}
