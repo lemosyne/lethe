@@ -180,7 +180,7 @@ where
                 E,
             >::new(
                 self.storage
-                    .read_handle(&entry.khf_id)
+                    .rw_handle(&entry.khf_id)
                     .map_err(|_| Error::Io)?,
                 &mut curr_khf,
                 &mut next_khf,
