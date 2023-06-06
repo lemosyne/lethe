@@ -240,6 +240,7 @@ where
         let khf_id = self.allocator.alloc().map_err(|_| Error::Alloc)?;
 
         self.mappings.insert(*objid, MapEntry { map_id, khf_id });
+
         self.object_khfs
             .insert(khf_id, Khf::new(&self.object_khf_fanouts, R::default()));
         self.master_khf.update(khf_id)?;
@@ -264,6 +265,7 @@ where
                 .map_err(|_| Error::Dealloc)?;
 
             self.object_khfs.remove(&entry.khf_id);
+            self.master_khf.update(entry.khf_id)?;
 
             self.storage.destroy(&entry.khf_id).map_err(|_| Error::Io)?;
             self.storage.destroy(&entry.map_id).map_err(|_| Error::Io)?;
